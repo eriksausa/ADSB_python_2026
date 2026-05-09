@@ -51,7 +51,7 @@ def resample_data(y_chunk: np.ndarray, new_fs: float, old_fs: float) -> Dict[str
             "Z": np.abs(inphase + 1j * quadrature),
         }
 
-    ratio = Fraction(new_fs / old_fs).limit_denominator(250)
+    ratio = Fraction(new_fs / old_fs).limit_denominator(1000)
     p_up, q_down = ratio.numerator, ratio.denominator
 
     inphase = np.real(y_chunk).astype(np.float64)
