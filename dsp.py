@@ -184,7 +184,7 @@ def calculate_freq_shift_and_phase_noise(
     )
 
     phase_std = float(np.std(np.angle(phasedelta1_0)))
-    threshold = 0.60
+    threshold = 0.45
     if np.std(phasedelta1_0) < threshold:
         f_measured1_0 = np.angle(np.mean(phasedelta1_0)) / (2.0 * np.pi * 1.0e-6)
         if len(phasedelta1_5) > 0:
@@ -229,7 +229,7 @@ def _sub_sample_corr_lag(sig_segment: np.ndarray, template_segment: np.ndarray) 
     r_plus = float(np.dot(s[1:], t[:-1]))
     denom = r_minus - 2.0 * r_zero + r_plus
     if abs(denom) > 1e-12:
-        return float(np.clip(0.5 * (r_minus - r_plus) / denom, -2.0, 2.0))
+        return float(np.clip(0.5 * (r_minus - r_plus) / denom, -1.0, 1.0))
     return 0.0
 
 
