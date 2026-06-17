@@ -239,8 +239,8 @@ class OnlineADSBDecoder:
     """
 
     # 17-bit CPR quantization grid resolution (~5.1 m lat, ~7.5 m lon -> 15 m combined tolerance)
-    CPR_QUANTIZATION_TOLERANCE_KM: float = 0.0
-    ALT_QUANTIZATION_TOLERANCE_FT: float = 0.0
+    CPR_QUANTIZATION_TOLERANCE_KM: float = 0.015
+    ALT_QUANTIZATION_TOLERANCE_FT: float = 25.0
 
     def __init__(self, config: Optional[ReceiverConfig] = None):
         self.config = config or ReceiverConfig()
