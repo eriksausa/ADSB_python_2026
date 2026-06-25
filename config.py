@@ -31,7 +31,7 @@ class ReceiverConfig:
     frame_duration_s: float = 120e-6         # 120 us Mode-S Extended Squitter frame
     iq_slice_buffer_s: float = 5e-6          # 5 us high-res IQ padding on either side of frame
     correlation_prominence: float = 0.0001
-    correlation_min_distance_samples: int = 250
+    correlation_min_distance_samples: int = 500
 
 
 @dataclass
