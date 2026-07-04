@@ -92,7 +92,7 @@ def build_blind_energy_mask_10mhz(envelope_frame: np.ndarray) -> Tuple[np.ndarra
     min_e = np.maximum(np.minimum(first_half_energy, second_half_energy), 1e-12)
     contrast_ratio = max_e / min_e
 
-    confident_slots = contrast_ratio > 1.8
+    confident_slots = contrast_ratio > 2.2
     decision_bits = (first_half_energy >= second_half_energy).astype(int)
 
     ppm_pairs = np.column_stack((decision_bits, 1 - decision_bits))
