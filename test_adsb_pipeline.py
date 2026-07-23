@@ -39,6 +39,8 @@ class TestADSBDSPCore(unittest.TestCase):
     def test_cpr_latitude_zones_standard(self):
         self.assertEqual(NL(0.0), 59)
         self.assertTrue(35 <= NL(48.196674) <= 45)
+        self.assertEqual(NL(87.5), 1)
+        self.assertEqual(NL(-88.0), 1)
 
 
 if __name__ == "__main__":

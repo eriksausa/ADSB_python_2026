@@ -21,7 +21,7 @@ def NL(lat: float) -> int:
     if np.isnan(lat):
         return 1
     abs_lat = np.abs(lat)
-    if abs_lat >= 89.0:
+    if abs_lat >= 87.0:
         return 1
     if abs_lat == 0.0:
         return 59
