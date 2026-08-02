@@ -534,7 +534,7 @@ def find_valid_xcorr(
             # Normalized preamble correlation check (distinguishes real Mode-S preamble from noise)
             seg_head = mes_env[:len_template] - np.mean(mes_env[:len_template])
             seg_norm = float(np.linalg.norm(seg_head))
-            if seg_norm < 1e-12:
+            if seg_norm < 1e-9:
                 continue
             norm_xcorr = float(np.dot(seg_head, preamble_ext_17) / (seg_norm * template_norm))
             if norm_xcorr < 0.75:

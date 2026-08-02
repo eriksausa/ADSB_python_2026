@@ -42,6 +42,11 @@ class TestADSBDSPCore(unittest.TestCase):
         self.assertEqual(NL(87.5), 1)
         self.assertEqual(NL(-88.0), 1)
 
+    def test_ideal_10mhz_mask_length(self):
+        dummy_bits = np.zeros(112, dtype=int)
+        mask = build_ideal_10mhz_mask(dummy_bits)
+        self.assertEqual(len(mask), 1200)
+
 
 if __name__ == "__main__":
     unittest.main()
