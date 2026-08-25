@@ -331,7 +331,7 @@ class ADSBDatabase:
         cur = self.conn.cursor()
         cur.execute("DELETE FROM aircraft_rf_profiles;")
 
-        df_frames = self.query_df("SELECT * FROM adsb_frames")
+        df_frames = self.query_df("SELECT * FROM adsb_frames ORDER BY timestamp ASC")
         if df_frames.empty:
             return pd.DataFrame()
 
@@ -387,7 +387,7 @@ class ADSBDatabase:
 
     def export_csv(self, filename: str = "adsb_table.csv") -> pd.DataFrame:
         """Exports the full `adsb_frames` table to CSV (replacing legacy `create_table()`)."""
-        df = self.query_df("SELECT * FROM adsb_frames")
+        df = self.query_df("SELECT * FROM adsb_frames ORDER BY timestamp ASC")
         df.to_csv(filename, index=False)
         return df
 
