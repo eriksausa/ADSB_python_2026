@@ -686,10 +686,10 @@ class RFFingerprintClassifier:
                 sss = StratifiedShuffleSplit(n_splits=1, test_size=0.20, random_state=42)
                 tr_idx_80, te_idx_20 = next(sss.split(X_eval, y_eval))
                 holdout_rf = RandomForestClassifier(
-                    n_estimators=200, max_depth=8, max_features="sqrt", n_jobs=-1, random_state=42
+                    n_estimators=200, max_depth=18, max_features="sqrt", n_jobs=-1, random_state=42
                 )
                 holdout_et = ExtraTreesClassifier(
-                    n_estimators=200, max_depth=10, max_features="sqrt", n_jobs=-1, random_state=42
+                    n_estimators=200, max_depth=20, max_features="sqrt", n_jobs=-1, random_state=42
                 )
                 holdout_rf.fit(X_eval[tr_idx_80], y_eval[tr_idx_80])
                 holdout_et.fit(X_eval[tr_idx_80], y_eval[tr_idx_80])
@@ -752,8 +752,8 @@ class RFFingerprintClassifier:
                     (
                         "rf_clf",
                         RandomForestClassifier(
-                            n_estimators=100,
-                            max_depth=8,
+                            n_estimators=250,
+                            max_depth=18,
                             min_samples_leaf=1,
                             max_features="sqrt",
                             class_weight=None,
@@ -772,8 +772,8 @@ class RFFingerprintClassifier:
                     (
                         "et_clf",
                         ExtraTreesClassifier(
-                            n_estimators=100,
-                            max_depth=10,
+                            n_estimators=250,
+                            max_depth=20,
                             min_samples_leaf=1,
                             max_features="sqrt",
                             class_weight=None,
