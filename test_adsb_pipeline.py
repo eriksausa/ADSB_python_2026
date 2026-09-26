@@ -47,6 +47,18 @@ class TestADSBDSPCore(unittest.TestCase):
         mask = build_ideal_10mhz_mask(dummy_bits)
         self.assertEqual(len(mask), 1200)
 
+    def test_unwrap_free_cfo_recovery_and_12_features(self):
+        from anomaly_ml import _recover_missing_cfo_from_iq, extract_12_rf_features_from_frame
+        bits = np.zeros(112, dtype=int)
+        mask = build_ideal_10mhz_mask(bits).astype(float)
+        t = np.arange(1200) / 10e6
+        true_cfo_hz = -106447.0
+        iq_res = mask * np.exp(1j * 2.0 * np.pi * true_cfo_hz * t)
+        rec_cfo, _ = _recover_missing_cfo_from_iq({"IQ_res": iq_res, "Bits": bits})
+        self.assertTrue(abs(rec_cfo - true_cfo_hz) < 1500.0)
+        vec12 = extract_12_rf_features_from_frame({"IQ_res": iq_res, "Bits": bits, "CFO_Raw_Hz": rec_cfo, "Power": -55.0})
+        self.assertEqual(vec12.shape, (12,))
+
 
 if __name__ == "__main__":
     unittest.main()
