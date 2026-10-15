@@ -175,7 +175,7 @@ def plot_rf_fingerprint_clusters(
     CRC-Failed bursts attributed via Blind RF Fingerprinting.
     """
     out_path = Path(save_path)
-    fig, ax = plt.subplots(figsize=(10.5, 6.2), dpi=100)
+    fig, ax = plt.subplots(figsize=(10.5, 6.2), dpi=150)
 
     valid_df = df.dropna(subset=["freq_offset_hz", "timing_offset_ppm"]).copy()
     valid_df["cfo_khz"] = valid_df["freq_offset_hz"] / 1e3
