@@ -142,7 +142,7 @@ def synthesize_portfolio_iq_stream(
       which aircraft transmitted each burst!).
     """
     rng = np.random.default_rng(42)
-    duration_s = 0.045  # 58 ms continuous capture (~742,400 samples at 12.8 MS/s)
+    duration_s = 0.058  # 58 ms continuous capture (~742,400 samples at 12.8 MS/s)
     total_samples = int(round(duration_s * raw_fs))
     iq_stream = (rng.normal(0, 3.0e-6, total_samples) + 1j * rng.normal(0, 3.0e-6, total_samples)).astype(
         np.complex128
