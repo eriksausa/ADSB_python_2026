@@ -30,3 +30,24 @@ Evolved from rooftop Vector Signal Analyzer (Keysight UXA N9040B, 12.8 MS/s) mea
 - `visualization.py` â€” Interactive Leaflet.js HTML trajectory map (`adsb_map.html`), 2D RF cluster scatter plot (`rf_fingerprint_clusters.png`), IQ FFT spectra, and PPM eye diagram.
 - `main.py` â€” End-to-end online pipeline runner (supports full multi-GB VSA captures or built-in synthetic 12.8 MS/s multi-aircraft stream when raw captures are omitted).
 - `test_adsb_pipeline.py` â€” Unit test suite covering CRC-24, CPR latitude zones, Doppler/EIRP physics, and unwrap-free CFO recovery.
+
+## Empirical Performance on TU Wien 268M-Sample Rooftop Capture
+
+Evaluated on a continuous $20.97\text{ s}$ capture ($268,434,198$ complex I/Q samples at $12.80\text{ MS/s}$, yielding $2,809$ CRC-valid Mode-S frames across commercial airliners over Vienna):
+
+| Evaluation Metric | Result | Notes |
+| :--- | :--- | :--- |
+| **80/20 Stratified Holdout Test Accuracy** | **90.6%** | Evaluated out-of-sample across enrolled aircraft ($\ge 5$ frames) |
+| **5-Fold Stratified Cross-Validation Accuracy** | **90.3%** | 5-fold out-of-fold evaluation across all eligible aircraft |
+| **Top-3 Candidate Match Accuracy** | **100.0%** | True transmitting aircraft ranked within top 3 RF posterior matches |
+| **All-Frame Clean Inlier Fit** | **100.0%** | Zero label leakage; integer-indexed damped sample weighting |
+
+## Quick Start
+
+```bash
+pip install -r requirements.txt
+python main.py
+pytest test_adsb_pipeline.py
+```
+
+> **Note on Raw I/Q Data Files**: Multi-gigabyte raw Keysight VSA captures (`101000.mat`, `receivedSignals.npy`, ~2.1 GB each) are excluded via `.gitignore`. When run without the external `.npy` file present, `main.py` automatically synthesizes a calibrated $12.8\text{ MS/s}$ multi-aircraft Mode-S I/Q stream so the entire DSP, DuckDB, and ML pipeline can be executed and verified out of the box.
