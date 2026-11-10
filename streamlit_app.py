@@ -2,9 +2,14 @@
 Streamlit Interactive Cockpit for the 1090 MHz ADS-B Physical-Layer RF Fingerprinting
 & Spoofing Detection Pipeline (`streamlit_app.py`).
 
+Author: Erik Šauša, Dipl.-Ing. (M.Sc.)
+Origin: 2026 Machine Learning & Deep Learning expansion of Erik Šauša's B.Sc. Thesis
+        ("Analysis of Modulation Parameters of Surveillance Systems ADS-B and SSR",
+        Institute of Telecommunications, TU Wien / Vienna University of Technology).
+
 Loads the TU Wien Rooftop Capture telemetry (`adsb_table.csv` — 2,809 CRC-valid frames
-from 268M I/Q samples at 12.80 MS/s) for instant interactive exploration and live
-physical-layer spoofing simulation.
+from 268M I/Q samples at 12.80 MS/s) for interactive exploration and live physical-layer
+spoofing simulation.
 
 Run locally:
     streamlit run streamlit_app.py
@@ -18,7 +23,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 st.set_page_config(
-    page_title="ADS-B Physical-Layer RF Fingerprinting & Spoofing Detector",
+    page_title="ADS-B RF Fingerprinting & ML Spoofing Detector | Erik Šauša",
     page_icon="📡",
     layout="wide",
 )
@@ -95,12 +100,43 @@ def main() -> None:
     base_dir = Path(__file__).resolve().parent
     csv_path = base_dir / "adsb_table.csv"
 
-    st.title("📡 1090 MHz ADS-B Physical-Layer RF Fingerprinting & Spoofing Detector")
+    # --- Header & Author Attribution ---
+    st.title("📡 1090 MHz ADS-B Physical-Layer RF Fingerprinting & Spoofing Detection")
     st.markdown(
-        "**Institute of Telecommunications (TU Wien) Rooftop VSA Capture & Hybrid ML/DL Authentication Pipeline**  \n"
-        "*Authenticating Mode-S (`DF=17`) aircraft transponders via Carrier Frequency Offset (CFO), "
-        "Symbol Clock Drift (ppm), Power Amplifier Droop, and Equivalent Isotropically Radiated Power (EIRP).*"
+        "#### **By Erik Šauša, Dipl.-Ing. (M.Sc.)**  \n"
+        "*A 2026 Machine Learning & Deep Neural Network expansion of my Bachelor's Thesis at the "
+        "**Institute of Telecommunications, TU Wien (Vienna University of Technology)**: "
+        "\"Analysis of Modulation Parameters of Surveillance Systems ADS-B and SSR.\"*"
     )
+
+    # --- Abstract & Project Motivation Card ---
+    st.info(
+        "**Abstract & Why This Matters (The Core Problem):**  \n"
+        "Modern Air Traffic Control relies on **ADS-B** (*Automatic Dependent Surveillance–Broadcast* at $1090\\text{ MHz}$), "
+        "where aircraft broadcast their GPS coordinates, altitude, velocity, and 24-bit ICAO identity every half-second. "
+        "However, **ADS-B has zero cryptographic authentication**: anyone with a $300 Software-Defined Radio (SDR) can "
+        "broadcast spoofed digital messages claiming to be a commercial airliner or inject ghost aircraft onto radar screens.  \n\n"
+        "**The Physical-Layer Solution:**  \n"
+        "While digital bits are trivial to forge, an attacker cannot easily replicate the microscopic **analog hardware imperfections** "
+        "of a specific aircraft's 250W–500W Mode-S transponder—such as crystal local oscillator carrier frequency offset (CFO), "
+        "Manchester $2\\text{ MHz}$ symbol clock drift (ppm), power amplifier (PA) storage-capacitor voltage droop, turn-on overshoot, "
+        "and phase noise. This project extracts a **12-dimensional physical-layer RF fingerprint** from every $120\\,\\mu\\text{s}$ burst "
+        "to authenticate the transmitting aircraft hardware and detect spoofing without relying on the digital payload."
+    )
+
+    with st.expander("📖 Evolution of the Project: 2019 TU Wien B.Sc. Thesis ➔ 2026 ML & Neural Network Expansion"):
+        st.markdown(
+            """
+            * **Stage 1 — 2018–2019 B.Sc. Thesis at TU Wien (MATLAB & Keysight UXA N9040B VSA)**:
+              * Recorded live $1090\\text{ MHz}$ complex baseband I/Q signals ($12.8\\text{ MS/s}$) from a $5.5\\text{ dBi}$ collinear antenna on the roof of the TU Wien Telecommunications Institute in Vienna.
+              * Built the complete physical-layer DSP & Mode-S decoder from scratch: preamble cross-correlation, Pulse Position Modulation (PPM) bit slicing, modulo-2 `CRC-24` parity verification, Compact Position Reporting (CPR) trajectory decoding, Free-Space Path Loss (FSPL) transmit power estimation, and spherical-geometry Doppler shift compensation.
+              * *2019 Finding*: Proved that no *single* modulation parameter in isolation (frequency offset alone, power alone, or timestamp periodicity alone) uniquely identifies an aircraft across an entire airspace.
+            * **Stage 2 — 2026 Machine Learning & Deep Learning Expansion (Python 3.12, Scikit-Learn & PyTorch)**:
+              * **Unwrap-Free Two-Stage CFO Recovery**: Solved high-offset phase wrapping across pulse gaps by combining intra-pulse $0.1\\,\\mu\\text{s}$ conjugate products ($\\pm 5.0\\text{ MHz}$ unambiguous range) with derotated $1.0\\,\\mu\\text{s}$ / $1.5\\,\\mu\\text{s}$ unit-phasor refinement, plus per-aircraft kinematic Doppler/EIRP interpolation across `TC 4` (Callsign), `TC 11` (Position), and `TC 19` (Velocity) frames.
+              * **12-Feature Hardware Fingerprint Vector**: Expanded the signal representation to 12 physical features including PA envelope sag (`PA_Droop_dB`), turn-on overshoot (`Pulse_Crest_Factor`), thermal frequency pulling (`Phase_Curvature_Rad`), and symbol clock drift (`Timing_Offset_PPM`).
+              * **Hybrid ML Ensemble & Neural Networks**: Combined a supervised **RandomForest + ExtraTrees + Bayesian Mahalanobis Posterior** ensemble with a **PyTorch Deep Autoencoder** (`RFAnomalyAutoencoder`, $12 \\rightarrow 24 \\rightarrow 3 \\rightarrow 24 \\rightarrow 12$) and a **1D Raw-I/Q Convolutional Neural Network** (`IQConvNet1D`), boosting multi-aircraft classification accuracy to **90.6%** (**100.0% Top-3 accuracy**) across 2,809 real frames from the Vienna rooftop capture.
+            """
+        )
 
     if not csv_path.exists():
         st.error(f"Telemetry file `{csv_path.name}` not found. Run `python main.py` first to generate `adsb_table.csv`.")
@@ -109,7 +145,10 @@ def main() -> None:
     df = load_rooftop_csv_telemetry(str(csv_path))
     prof_df = build_aircraft_profiles_from_df(df)
 
-    # --- Sidebar Controls ---
+    # --- Sidebar Author & Controls ---
+    st.sidebar.markdown("### 👨‍💻 **Erik Šauša, Dipl.-Ing.**")
+    st.sidebar.caption("M.Sc. & B.Sc. in Telecommunications & Information Engineering — TU Wien")
+    st.sidebar.markdown("---")
     st.sidebar.header("⚙️ Security Gate & Spoofing Simulator")
     outlier_z = st.sidebar.slider(
         "Mahalanobis Spoofing Gate (σ):",
