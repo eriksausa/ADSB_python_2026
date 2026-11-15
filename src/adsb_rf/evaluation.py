@@ -482,15 +482,21 @@ def score_simulated_burst_with_residuals(
     target_icao: str,
     sim_cfo_khz: float,
     sim_ppm: float,
-    sim_eirp: float,
-    outlier_z: float,
+    sim_eirp: Optional[float] = None,
+    outlier_z: float = DEFAULT_ASSUMPTIONS.outlier_z_threshold,
     residual_stats: Optional[Dict[str, float]] = None,
+    *,
+    sim_eirp_dbm: Optional[float] = None,
+    residual_uncertainty: Optional[Dict[str, float]] = None,
 ) -> Dict[str, Any]:
     """
     Evaluates a simulated ADS-B burst against the enrolled aircraft profiles in `prof_df`
     using the `Assumptions` Mahalanobis weights and empirical out-of-fold backtest residual
     quantiles (`mahal_p90`, `mahal_p95`, `cfo_err_p90_khz`, `ppm_err_p90`).
     """
+    eirp_val = float(sim_eirp_dbm if sim_eirp_dbm is not None else (sim_eirp if sim_eirp is not None else 55.0))
+    res_dict = residual_uncertainty if residual_uncertainty is not None else residual_stats
+
     if prof_df.empty or target_icao not in prof_df["icao_hex"].values:
         return {
             "d_claimed": 0.0,
@@ -501,6 +507,9 @@ def score_simulated_burst_with_residuals(
             "pred_cs": "N/A",
             "is_spoof": False,
             "mahal_p95_backtest": 2.15,
+            "oof_p95_gate": 2.15,
+            "cfo_ci90_khz": 1.50,
+            "ppm_ci90": 45.0,
         }
 
     # Normalize the 3 interactive slider dimensions using the canonical Mahalanobis weights
@@ -517,7 +526,7 @@ def score_simulated_burst_with_residuals(
 
     z_cfo = (sim_cfo_khz - prof_df["mean_cfo_khz"].to_numpy(dtype=np.float64)) / std_cfo
     z_ppm = (sim_ppm - prof_df["mean_timing_ppm"].to_numpy(dtype=np.float64)) / std_ppm
-    z_eirp = (sim_eirp - prof_df["mean_eirp_dbm"].to_numpy(dtype=np.float64)) / std_eirp
+    z_eirp = (eirp_val - prof_df["mean_eirp_dbm"].to_numpy(dtype=np.float64)) / std_eirp
 
     d_all = np.sqrt(w_cfo * (z_cfo ** 2) + w_ppm * (z_ppm ** 2) + w_eirp * (z_eirp ** 2))
     target_idx = int(prof_df.index[prof_df["icao_hex"] == target_icao][0])
@@ -540,10 +549,18 @@ def score_simulated_burst_with_residuals(
         )
     )
 
-    res_p90 = residual_stats["mahal_p90"] if residual_stats else 1.65
-    res_p95 = residual_stats["mahal_p95"] if residual_stats else 2.15
+    res_p90 = float(res_dict.get("mahal_p90", 1.65)) if res_dict else 1.65
+    res_p95 = float(res_dict.get("mahal_p95", 2.15)) if res_dict else 2.15
     d_ci_low = max(0.0, d_claimed - 0.5 * res_p90)
     d_ci_high = d_claimed + 0.5 * res_p90
+
+    target_row = prof_df.iloc[target_idx]
+    cfo_ci90_khz = float(
+        target_row.get("cfo_iqr_90_khz", res_dict.get("cfo_err_p90_khz", 1.50) if res_dict else 1.50)
+    )
+    ppm_ci90 = float(
+        target_row.get("ppm_iqr_90", res_dict.get("ppm_err_p90", 45.0) if res_dict else 45.0)
+    )
 
     return {
         "d_claimed": d_claimed,
@@ -554,4 +571,7 @@ def score_simulated_burst_with_residuals(
         "pred_cs": pred_cs,
         "is_spoof": is_spoof,
         "mahal_p95_backtest": res_p95,
+        "oof_p95_gate": res_p95,
+        "cfo_ci90_khz": cfo_ci90_khz,
+        "ppm_ci90": ppm_ci90,
     }

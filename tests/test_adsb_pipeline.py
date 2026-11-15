@@ -213,6 +213,23 @@ class TestADSBDSPCore(unittest.TestCase):
         rows = get_assumptions_table_rows()
         self.assertGreaterEqual(len(rows), 6)
 
+        # Verify score_simulated_burst_with_residuals matches streamlit_app.py call signature & return keys
+        df_csv = pd.read_csv(ROOT_DIR / "adsb_table.csv").head(60)
+        prof_df = build_aircraft_profiles_from_df(df_csv)
+        target_icao = str(prof_df["icao_hex"].iloc[0])
+        verdict = score_simulated_burst_with_residuals(
+            prof_df=prof_df,
+            target_icao=target_icao,
+            sim_cfo_khz=float(prof_df["mean_cfo_khz"].iloc[0]) + 40.0,
+            sim_ppm=float(prof_df["mean_timing_ppm"].iloc[0]) + 150.0,
+            sim_eirp_dbm=56.0,
+            outlier_z=4.5,
+            residual_uncertainty={"mahal_p90": 1.81, "mahal_p95": 2.30, "cfo_err_p90_khz": 14.0, "ppm_err_p90": 141.0},
+        )
+        for key in ("d_claimed", "d_ci_low", "d_ci_high", "claimed_prob", "pred_icao", "pred_cs", "is_spoof", "oof_p95_gate", "cfo_ci90_khz", "ppm_ci90"):
+            self.assertIn(key, verdict)
+        self.assertTrue(verdict["is_spoof"])
+
 
 if __name__ == "__main__":
     unittest.main()

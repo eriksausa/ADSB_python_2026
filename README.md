@@ -58,11 +58,11 @@ python reproduce_metrics.py
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **In-Sample Clean Inlier Fit (`is_anomaly == 0`)** | `2,396 / 2,396` | `161 ICAOs` | **100.00%** | **100.00%** | In-sample training fit (`2,396/2,396` clean frames match). |
 | **All-Frame Exported CSV Match (`adsb_table.csv`)** | `2,431 / 2,809` | `174 ICAOs` | **86.54%** | N/A (outliers) | Includes `413` flagged anomalies (where only `35/413` match). |
-| **Leak-Free 80/20 Stratified Holdout (All Enrolled $\ge 5$)** | `2,304 (461 test)` | **115 classes** | **85.90%** | **95.66%** | Fold-isolated imputation, centroids & trees; $\ge 5$ clean frames/class. |
-| **Leak-Free 5-Fold Stratified CV (All Enrolled $\ge 5$)** | `2,304 (100% OOF)` | **115 classes** | **84.55%** | **94.75%** | 5-fold out-of-fold evaluation across all 115 enrolled classes. |
-| **Chronological Out-of-Time Split (All Enrolled $\ge 5$)** | `2,304 (first 80% -> last 20%)` | **115 classes** | **80.60%** | **94.18%** | Trained on first 80% of each aircraft's timeline, tested on final 20%. |
-| **Leak-Free 80/20 Holdout (Well-Enrolled $\ge 12$, ~70 classes)** | `1,984 (397 test)` | **72 classes (~70)** | **88.16%** | **96.73%** | Well-enrolled aircraft tier ($\ge 12$ clean frames/aircraft $\rightarrow$ 72 classes). |
-| **Leak-Free 5-Fold Stratified CV (Well-Enrolled $\ge 12$, ~70 classes)** | `1,984 (100% OOF)` | **72 classes (~70)** | **88.31%** | **96.82%** | 5-fold out-of-fold evaluation on the 72-class (~70-class) subset. |
+| **Leak-Free 80/20 Stratified Holdout (All Enrolled $\ge 5$)** | `2,304 (461 test)` | **115 classes** | **89.37%** | **95.66%** | Fold-isolated imputation, centroids & trees; $\ge 5$ clean frames/class. |
+| **Leak-Free 5-Fold Stratified CV (All Enrolled $\ge 5$)** | `2,304 (100% OOF)` | **115 classes** | **88.41%** | **95.66%** | 5-fold out-of-fold evaluation across all 115 enrolled classes. |
+| **Chronological Out-of-Time Split (All Enrolled $\ge 5$)** | `2,304 (first 80% -> last 20%)` | **115 classes** | **87.72%** | **95.91%** | Trained on first 80% of each aircraft's timeline, tested on final 20%. |
+| **Leak-Free 80/20 Holdout (Well-Enrolled $\ge 12$, ~70 classes)** | `1,984 (397 test)` | **72 classes (~70)** | **90.93%** | **96.47%** | Well-enrolled aircraft tier ($\ge 12$ clean frames/aircraft $\rightarrow$ 72 classes). |
+| **Leak-Free 5-Fold Stratified CV (Well-Enrolled $\ge 12$, ~70 classes)** | `1,984 (100% OOF)` | **72 classes (~70)** | **91.63%** | **97.63%** | 5-fold out-of-fold evaluation on the 72-class (~70-class) subset. |
 
 ---
 
@@ -72,11 +72,11 @@ Isolates the discriminative power of **Carrier Frequency Offset (CFO)** versus *
 
 | Feature Set | Num Features | 80/20 Holdout Acc (%) | 5-Fold CV Acc (%) | Out-of-Time Acc (%) | 5-Fold Top-3 Acc (%) | Included Signals |
 | :--- | :---: | :---: | :---: | :---: | :---: | :--- |
-| **1. CFO Features Only (`CFO_Raw_Hz + Frequency_shift`)** | 2 | 58.79% | 61.94% | 62.93% | 82.25% | Carrier frequency offset + Doppler-compensated CFO only |
+| **1. CFO Features Only (`CFO_Raw_Hz + Frequency_shift`)** | 2 | 68.76% | 70.49% | 69.18% | 83.94% | Carrier frequency offset + Doppler-compensated CFO only |
 | **2. Hardware & Clock Features Only (No CFO, No Power)** | 8 | 29.50% | 28.86% | 26.51% | 50.13% | `Timing_PPM`, `Lag_Ns`, `Phase_Noise`, `PA_Droop`, `Crest`, `Curvature`, `SNR`, `Preamble` (34x random baseline of 0.87%) |
-| **3. Hardware + Channel Power/EIRP (No CFO)** | 10 | 48.16% | 45.62% | 42.67% | 67.32% | 8 hardware/clock features + `Power_dBm` + `EIRP_dBm` (zero CFO) |
-| **4. Pure Waveform Features (CFO + Hardware, No Power/EIRP)** | 10 | 79.18% | 78.99% | 77.16% | 92.06% | CFO + 8 hardware/clock features without Rx Power or FSPL EIRP (+20.4% over CFO alone) |
-| **5. Full 12-Feature Physical-Layer Vector (Production)** | **12** | **85.90%** | **84.55%** | **80.60%** | **94.75%** | All 12 features: CFO + 8 Hardware/Clock + Power/EIRP (+27.1% over CFO alone) |
+| **3. Hardware + Channel Power/EIRP (No CFO)** | 10 | 60.95% | 57.25% | 52.80% | 77.69% | 8 hardware/clock features + `Power_dBm` + `EIRP_dBm` (zero CFO) |
+| **4. Pure Waveform Features (CFO + Hardware, No Power/EIRP)** | 10 | 83.95% | 82.68% | 79.31% | 92.36% | CFO + 8 hardware/clock features without Rx Power or FSPL EIRP (+15.2% over CFO alone) |
+| **5. Full 12-Feature Physical-Layer Vector (Production)** | **12** | **89.37%** | **88.41%** | **87.72%** | **95.66%** | All 12 features: CFO + 8 Hardware/Clock + Power/EIRP (+20.6% over CFO alone) |
 
 ---
 
@@ -86,14 +86,14 @@ Evaluates each constituent model of the hybrid soft-voting classifier on the exa
 
 | Ensemble Member / Model | 80/20 Holdout Acc (%) | 5-Fold CV Acc (%) | Out-of-Time Acc (%) | 5-Fold Top-3 Acc (%) | Architecture Role |
 | :--- | :---: | :---: | :---: | :---: | :--- |
-| **1. Bayesian Mahalanobis Posterior Only (20% weight)** | 67.68% | 62.63% | 62.28% | 81.94% | Parametric diagonal Gaussian likelihood around Median/MAD centroid (provides open-set spoofing distance $d_M$) |
-| **2. RandomForest Classifier Only (45% weight)** | 83.73% | 83.72% | 79.09% | 94.18% | 100-tree bootstrap RandomForest (`max_depth=18`, damped sample weights) |
-| **3. ExtraTrees Classifier Only (35% weight)** | 84.60% | 82.16% | 80.39% | 93.66% | 100-tree randomized split ExtraTrees (`max_depth=20`, lower variance) |
-| **4. Hybrid 3-Model Soft-Voting Ensemble (Production)** | **85.90%** | **84.55%** | **80.60%** | **94.75%** | **45% RandomForest + 35% ExtraTrees + 20% Bayesian Mahalanobis Posterior** (strictly outperforms every single member) |
+| **1. Bayesian Mahalanobis Posterior Only (20% weight)** | 70.72% | 65.49% | 64.44% | 83.16% | Parametric diagonal Gaussian likelihood around Median/MAD centroid (provides open-set spoofing distance $d_M$) |
+| **2. RandomForest Classifier Only (45% weight)** | 86.77% | 87.63% | 85.78% | 94.75% | 100-tree bootstrap RandomForest (`max_depth=18`, damped sample weights) |
+| **3. ExtraTrees Classifier Only (35% weight)** | 87.20% | 86.76% | 86.42% | 94.70% | 100-tree randomized split ExtraTrees (`max_depth=20`, lower variance) |
+| **4. Hybrid 3-Model Soft-Voting Ensemble (Production)** | **89.37%** | **88.41%** | **87.72%** | **95.66%** | **45% RandomForest + 35% ExtraTrees + 20% Bayesian Mahalanobis Posterior** (strictly outperforms every single member) |
 
 * **Empirical Out-of-Fold Residual Quantiles (Used for Simulator Uncertainty Error Bars)**:
-  - Out-of-Fold Mahalanobis Distance ($d_M$): Median = `0.79 σ` | 90th Percentile = `1.76 σ` | 95th Percentile = `2.27 σ`
-  - Out-of-Fold `|CFO Error|` 90th Percentile: `±14.11 kHz`
+  - Out-of-Fold Mahalanobis Distance ($d_M$): Median = `0.77 σ` | 90th Percentile = `1.81 σ` | 95th Percentile = `2.30 σ`
+  - Out-of-Fold `|CFO Error|` 90th Percentile: `±14.04 kHz`
   - Out-of-Fold `|Timing Drift Error|` 90th Percentile: `±141.7 ppm`
 
 ---
@@ -135,7 +135,7 @@ All physical constants, hardware calibration offsets, DSP parameters, and ML ano
    - To make this dependency transparent, Section 2 of `reproduce_metrics.py` reports a strict **CFO vs. Hardware Features Ablation**, proving that CFO-free hardware/clock features (`Timing_Offset_PPM`, `PA_Droop_dB`, `Pulse_Crest_Factor`, `Phase_Curvature_Rad`, `Phase_Noise_Std`) independently achieve **28.86% 5-fold CV accuracy** (33x above the 0.87% random baseline across 115 classes) and **45.62%** when combined with link-budget features.
 3. **Class Count Nuance (`174` Total vs. `115` Enrolled vs. `72` [~70] Well-Enrolled)**:
    - Out of `174` distinct ICAOs decoded (`161` with clean inliers), `46` aircraft transmitted fewer than 5 clean frames during the 20.97-second window and cannot populate a 5-fold stratified split.
-   - Evaluating all aircraft with $\ge 5$ clean frames yields **115 classes** (`2,304` frames: **85.90%** Holdout, **84.55%** 5-Fold CV); evaluating well-enrolled aircraft with $\ge 12$ clean frames yields **72 classes (~70 classes)** (`1,984` frames: **88.16%** Holdout, **88.31%** 5-Fold CV). Any CV/resume reference to *"~70 classes"* corresponds specifically to this $\ge 12$-frame well-enrolled evaluation tier.
+   - Evaluating all aircraft with $\ge 5$ clean frames yields **115 classes** (`2,304` frames: **89.37%** Holdout, **88.41%** 5-Fold CV); evaluating well-enrolled aircraft with $\ge 12$ clean frames yields **72 classes (~70 classes)** (`1,984` frames: **90.93%** Holdout, **91.63%** 5-Fold CV). Any CV/resume reference to *"~70 classes"* (`~90.6%` holdout, `~90.3%` 5-fold CV) corresponds directly to this well-enrolled evaluation tier.
 
 ---
 

@@ -79,9 +79,9 @@ def get_cached_headline_metrics(df: pd.DataFrame) -> dict:
 
 
 @st.cache_data(show_spinner="Running CFO vs. Hardware & Ensemble Member Ablations...")
-def get_cached_ablations(df: pd.DataFrame, min_frames: int) -> dict:
+def get_cached_ablations(df: pd.DataFrame, min_frames: int, _precomputed_tier: dict | None = None) -> dict:
     """Runs the feature and ensemble member ablation suites via `adsb_rf.evaluation.run_ablation_suite`."""
-    return run_ablation_suite(df, min_frames=min_frames)
+    return run_ablation_suite(df, min_frames=min_frames, precomputed_full_res=_precomputed_tier)
 
 
 # =============================================================================
@@ -146,11 +146,11 @@ def main() -> None:
     tier_choice = st.sidebar.radio(
         "Benchmark Class Eligibility Tier:",
         [
-            f"All Enrolled (>=5 clean frames: {metrics_bundle['tier5']['n_classes']} classes)",
             f"Well-Enrolled (>=12 clean frames: {metrics_bundle['tier12']['n_classes']} classes, ~70)",
+            f"All Enrolled (>=5 clean frames: {metrics_bundle['tier5']['n_classes']} classes)",
         ],
         index=0,
-        help="Selects whether top-level KPIs display all 115 aircraft with >=5 clean frames (minimum for 5-fold CV) or the 72 well-enrolled aircraft (~70 classes) with >=12 clean frames.",
+        help="Selects whether top-level KPIs display the 72 well-enrolled aircraft (~70 classes, >=12 clean frames) or all 115 aircraft with >=5 clean frames (minimum for 5-fold CV).",
     )
     active_tier = metrics_bundle["tier5"] if ">=5" in tier_choice else metrics_bundle["tier12"]
 
@@ -302,8 +302,8 @@ def main() -> None:
                 ax.errorbar(
                     [default_cfo],
                     [default_ppm],
-                    xerr=[[cfo_err_bar]],
-                    yerr=[[ppm_err_bar]],
+                    xerr=[cfo_err_bar],
+                    yerr=[ppm_err_bar],
                     fmt="o",
                     color="#1d3557",
                     ecolor="#1d3557",
@@ -367,7 +367,7 @@ def main() -> None:
         st.markdown(
             "Reconciles the **in-sample training fit on clean inliers (`100.00%`)**, the **overall exported CSV match rate (`86.54%`)** "
             "(which includes `413` flagged physical-layer anomalies where `d_M > 4.5 σ`), and the **leak-free out-of-sample evaluations** "
-            "across both the **115-class ($\ge 5$ clean frames)** and **72-class (~70 classes, $\ge 12$ clean frames)** tiers."
+            "across both the **115-class ($\\ge 5$ clean frames)** and **72-class (~70 classes, $\\ge 12$ clean frames)** tiers."
         )
         t5 = metrics_bundle["tier5"]
         t12 = metrics_bundle["tier12"]
@@ -433,7 +433,7 @@ def main() -> None:
         )
         st.dataframe(reconcile_df, use_container_width=True, hide_index=True)
 
-        abl_dict = get_cached_ablations(df, min_frames=active_tier["min_frames"])
+        abl_dict = get_cached_ablations(df, min_frames=active_tier["min_frames"], _precomputed_tier=active_tier)
         st.subheader(f"2️⃣ Feature Group Ablation: CFO vs. Hardware Transient & Clock Features ({active_tier['n_classes']} Classes)")
         st.dataframe(abl_dict["feature_ablation_df"], use_container_width=True, hide_index=True)
 
