@@ -1,4 +1,4 @@
-"""
+fixed adsb map creation"""
 Streamlit Interactive Cockpit for the 1090 MHz ADS-B Physical-Layer RF Fingerprinting
 & Spoofing Detection Pipeline (`streamlit_app.py`).
 
@@ -35,8 +35,13 @@ from adsb_rf import (
     build_aircraft_profiles_from_df,
     compute_reconciliation_and_headline_metrics,
     get_assumptions_table_rows,
+    map_planes,
+    plot_eye_diagram,
+    plot_iq_new,
+    resample_data,
     run_ablation_suite,
     score_simulated_burst_with_residuals,
+    synthesize_portfolio_iq_stream,
 )
 
 st.set_page_config(
@@ -58,7 +63,7 @@ CLUSTER_PALETTE_20 = [
 # =============================================================================
 
 @st.cache_data(show_spinner=False)
-def load_rooftop_csv_telemetry(csv_path_str: str) -> pd.DataFrame:
+def load_rooftop_csv_telemetry(csv_path_str: str, csv_mtime: float = 0.0) -> pd.DataFrame:
     """Loads the exported `adsb_table.csv` from the 268M-sample TU Wien rooftop capture."""
     df = pd.read_csv(csv_path_str)
     if "freq_offset_hz" in df.columns and "cfo_raw_hz" in df.columns:
@@ -132,7 +137,7 @@ def main() -> None:
         st.error(f"Telemetry file `{csv_path.name}` not found. Run `python main.py` first to generate `adsb_table.csv`.")
         return
 
-    df = load_rooftop_csv_telemetry(str(csv_path))
+    df = load_rooftop_csv_telemetry(str(csv_path), csv_path.stat().st_mtime)
     prof_df = get_cached_profiles(df)
     metrics_bundle = get_cached_headline_metrics(df)
     res_unc = metrics_bundle["residual_uncertainty"]
@@ -455,10 +460,28 @@ def main() -> None:
     with tab3:
         st.subheader("🗺️ Interactive Mode-S / ADS-B Trajectory Map (TU Wien Receiver)")
         map_file = ROOT_DIR / "adsb_map.html"
-        if map_file.exists():
-            components.html(map_file.read_text(encoding="utf-8"), height=560, scrolling=False)
-        else:
-            st.info("Run `python main.py` to generate `adsb_map.html`.")
+        if not map_file.exists():
+            messages_for_map = [
+                {
+                    "TC": int(r["tc"]),
+                    "ICAO": int(str(r["icao_hex"]), 16),
+                    "ICAO_Hex": str(r["icao_hex"]),
+                    "Predicted_ICAO_Hex": str(r.get("predicted_icao_hex", r["icao_hex"])),
+                    "Call_sign": None if pd.isna(r.get("callsign")) else str(r.get("callsign")),
+                    "Latitude": float(r["latitude"]) if pd.notna(r.get("latitude")) else float("nan"),
+                    "Longitude": float(r["longitude"]) if pd.notna(r.get("longitude")) else float("nan"),
+                    "Altitude": float(r["altitude_ft"]) if pd.notna(r.get("altitude_ft")) else 0.0,
+                    "Power": float(r["rx_power_dbm"]) if pd.notna(r.get("rx_power_dbm")) else -75.0,
+                    "Distance_from_Rx": float(r["distance_m"]) if pd.notna(r.get("distance_m")) else 0.0,
+                    "Frequency_shift": float(r["freq_offset_hz"]) if pd.notna(r.get("freq_offset_hz")) else 0.0,
+                    "Timing_Offset_PPM": float(r["timing_offset_ppm"]) if pd.notna(r.get("timing_offset_ppm")) else 0.0,
+                    "Is_Anomaly": bool(r.get("is_anomaly", 0)),
+                    "Anomaly_Reasons": str(r.get("anomaly_reasons", "Normal")),
+                }
+                for _, r in df.iterrows()
+            ]
+            map_planes(messages_for_map, output_html=map_file)
+        components.html(map_file.read_text(encoding="utf-8"), height=560, scrolling=False)
 
     with tab4:
         st.subheader("✈️ Enrolled Aircraft RF Fingerprint Profiles")
@@ -474,17 +497,21 @@ def main() -> None:
         iq_png = ROOT_DIR / "iq_spectrum_sample.png"
         eye_png = ROOT_DIR / "eye_diagram_sample.png"
 
+        if not iq_png.exists() or not eye_png.exists():
+            synth_raw = synthesize_portfolio_iq_stream(duration_sec=0.05)
+            synth_10m = resample_data(synth_raw, fs_raw=12.8e6, fs_target=10.0e6)
+            burst_10m = synth_10m[:1200]
+            plot_iq_new(
+                [{"Timestamp": 0.0, "ICAO_Hex": "3C6541", "IQ": synth_raw[:1536], "IQ_res": burst_10m}],
+                save_path=iq_png,
+            )
+            plot_eye_diagram(burst_10m, msps=10.0, pulse_duration_us=1.0, save_path=eye_png)
+
         with col_iq:
-            if iq_png.exists():
-                st.image(str(iq_png), caption="1090 MHz Mode-S Baseband I/Q, Envelope & Phase Trajectory", use_container_width=True)
-            else:
-                st.info("`iq_spectrum_sample.png` not found in directory.")
+            st.image(str(iq_png), caption="1090 MHz Mode-S Baseband I/Q, Envelope & Phase Trajectory", use_container_width=True)
 
         with col_eye:
-            if eye_png.exists():
-                st.image(str(eye_png), caption="10 MS/s Mode-S Manchester PPM Eye Diagram (2-Symbol Window)", use_container_width=True)
-            else:
-                st.info("`eye_diagram_sample.png` not found in directory.")
+            st.image(str(eye_png), caption="10 MS/s Mode-S Manchester PPM Eye Diagram (2-Symbol Window)", use_container_width=True)
 
 
 if __name__ == "__main__":
