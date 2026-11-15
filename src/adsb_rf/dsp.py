@@ -1,16 +1,21 @@
 """
-Digital Signal Processing (DSP) and Physical-Layer RF Feature Extraction Module.
-Performs Mode-S preamble cross-correlation, PPM demodulation, 24-bit CRC validation,
-calibrated RF power/EIRP estimation, Carrier Frequency Offset (CFO) estimation,
-Symbol Clock / Timing Offset extraction, and BLIND RF Fingerprinting for CRC-failed bursts.
+Digital Signal Processing (DSP) and Physical-Layer RF Feature Extraction (`src/adsb_rf/dsp.py`).
+
+Performs:
+- Mode-S preamble cross-correlation & PPM bit slicing (`decode_ppm`)
+- 24-bit CRC parity verification (`is_valid`, G(x) = 0xFFF409)
+- Two-stage unwrap-free Carrier Frequency Offset (CFO) & phase noise estimation
+- Sub-sample parabolic correlation lag & symbol clock crystal drift (`estimate_timing_offset`)
+- 5 hardware transient waveform features (`extract_waveform_transient_features`)
+- Calibrated RF power, Free-Space Path Loss EIRP, and spherical kinematic Doppler shift
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 from scipy.signal import find_peaks
 
-from config import ReceiverConfig
-from stream_reader import IQStreamChunk
+from .assumptions import DEFAULT_ASSUMPTIONS, ReceiverConfig
+from .stream_reader import IQStreamChunk
 
 
 def decode_ppm(envelope_frame: np.ndarray, sample_rate: float = 10e6) -> np.ndarray:
@@ -21,8 +26,8 @@ def decode_ppm(envelope_frame: np.ndarray, sample_rate: float = 10e6) -> np.ndar
     samples_per_half_bit = int(sample_rate / (2 * 1e6))
     ppm_one = np.repeat(np.array([1.0, -1.0]), samples_per_half_bit)
 
-    starting_point = int(8e-6 * sample_rate)  # Skip 8 us preamble (80 samples at 10 MHz)
-    bit_length = int(sample_rate * 1e-6)      # 10 samples per 1 us bit
+    starting_point = int(DEFAULT_ASSUMPTIONS.preamble_duration_s * sample_rate)
+    bit_length = int(sample_rate * 1e-6)
 
     payload_samples = envelope_frame[starting_point : starting_point + (112 * bit_length)]
     input_matrix = payload_samples.reshape(112, bit_length)
@@ -35,7 +40,7 @@ def decode_ppm(envelope_frame: np.ndarray, sample_rate: float = 10e6) -> np.ndar
 def is_valid(msg_bits: np.ndarray) -> bool:
     """
     Verifies 24-bit Mode-S CRC parity using modulo-2 polynomial division
-    with generator polynomial G(x) = 0xFFF409.
+    with generator polynomial G(x) = 0xFFF409 (ICAO Annex 10 Vol. IV / RTCA DO-260B).
     """
     poly = np.array(
         [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1],
@@ -71,14 +76,10 @@ def build_ideal_10mhz_mask(msg_bits: np.ndarray) -> np.ndarray:
 
 def build_blind_energy_mask_10mhz(envelope_frame: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Constructs a 1200-sample active pulse mask WITHOUT trusting CRC-validated bits:
-    1. Uses the fixed, known 8 us Mode-S preamble (`1010000101000000`) for samples 0..80.
+    Constructs a 1200-sample active pulse mask without trusting CRC-validated bits:
+    1. Uses the fixed 8 us Mode-S preamble (`1010000101000000`) for samples 0..80.
     2. For each 1 us symbol slot in the payload, selects the stronger 0.5 us half-chip
-       only if its energy contrast exceeds 2.2x the opposite half-chip (rejecting collided
-       or noise-corrupted symbols automatically).
-    Returns:
-        - `full_mask_10mhz`: 1200-sample mask (1 = clean active pulse, 0 = noise/corrupted)
-        - `confident_slot_mask`: 112-element boolean array indicating uncorrupted bit slots
+       only if its energy contrast exceeds `blind_ppm_contrast_ratio` (2.2x).
     """
     preamble_10mhz = np.repeat(
         np.array([1, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0]), 5
@@ -92,7 +93,7 @@ def build_blind_energy_mask_10mhz(envelope_frame: np.ndarray) -> Tuple[np.ndarra
     min_e = np.maximum(np.minimum(first_half_energy, second_half_energy), 1e-12)
     contrast_ratio = max_e / min_e
 
-    confident_slots = contrast_ratio > 2.2
+    confident_slots = contrast_ratio > DEFAULT_ASSUMPTIONS.blind_ppm_contrast_ratio
     decision_bits = (first_half_energy >= second_half_energy).astype(int)
 
     ppm_pairs = np.column_stack((decision_bits, 1 - decision_bits))
@@ -104,8 +105,8 @@ def build_blind_energy_mask_10mhz(envelope_frame: np.ndarray) -> Tuple[np.ndarra
 
 def calculate_amplitude(rx: np.ndarray, msg_bits: np.ndarray) -> float:
     """
-    Estimates the true RF pulse amplitude by averaging peak signal pulse levels
-    and subtracting the surrounding noise floor level.
+    Estimates true RF pulse amplitude by averaging flat pulse-top samples and
+    subtracting the off-pulse noise floor.
     """
     bits_modulated = build_ideal_10mhz_mask(msg_bits)
     bits_neg = 1 - bits_modulated
@@ -133,6 +134,76 @@ def calculate_amplitude(rx: np.ndarray, msg_bits: np.ndarray) -> float:
     return float(max(rx_mean - noise, 0.0))
 
 
+def recover_cfo_unwrap_free(
+    iq_res: Optional[np.ndarray],
+    bits: Optional[np.ndarray] = None,
+    fs_hz: float = 10e6,
+    custom_mask_10mhz: Optional[np.ndarray] = None,
+) -> Tuple[float, float]:
+    """
+    Two-stage unwrap-free Carrier Frequency Offset (CFO in Hz) and phase noise (rad) estimator:
+      - Stage A (Coarse Intra-Pulse Delay-and-Multiply, Unambiguous Range = +/- 5.0 MHz):
+        Computes `iq[n+1] * conj(iq[n])` strictly inside active 0.5 us pulses (`dt = 0.1 us`).
+      - Stage B (Fine 1.0 us & 1.5 us Unit-Phasor Pulse-Pair Refinement after Derotation):
+        Derotates the 1,200-sample burst by `f_coarse` so the residual offset sits near 0 Hz
+        (far from the +/- pi branch cut) and computes the weighted 1.0 us and 1.5 us slot phase slope.
+    """
+    if iq_res is None or len(iq_res) < 400:
+        return 0.0, 0.5
+
+    iq = np.asarray(iq_res[:1200], dtype=np.complex128)
+    L = len(iq)
+
+    if custom_mask_10mhz is not None and len(custom_mask_10mhz) >= L:
+        mask_10mhz = custom_mask_10mhz[:L].astype(bool)
+    elif bits is not None and len(np.squeeze(bits)) >= 112:
+        mask_10mhz = build_ideal_10mhz_mask(bits)[:L].astype(bool)
+    else:
+        env = np.abs(iq)
+        mask_10mhz = env >= np.percentile(env, DEFAULT_ASSUMPTIONS.active_pulse_percentile)
+
+    same_pulse = mask_10mhz[:-1] & mask_10mhz[1:]
+    if np.sum(same_pulse) < 10:
+        return 0.0, 0.5
+
+    conj_prod_1samp = iq[1:][same_pulse] * np.conj(iq[:-1][same_pulse])
+    f_coarse_hz = float(np.angle(np.sum(conj_prod_1samp)) / (2.0 * np.pi * (1.0 / fs_hz)))
+
+    t_vec = np.arange(L, dtype=np.float64) / fs_hz
+    iq_derot = iq * np.exp(-1j * 2.0 * np.pi * f_coarse_hz * t_vec)
+
+    n_slots = L // 10
+    iq_slots = (iq_derot[: n_slots * 10] * mask_10mhz[: n_slots * 10]).reshape(n_slots, 10).sum(axis=1) / 5.0
+    t_slots = (t_vec[: n_slots * 10] * mask_10mhz[: n_slots * 10]).reshape(n_slots, 10).sum(axis=1) / 5.0
+
+    valid_slots = np.abs(iq_slots) > 1e-12
+    rx_vals = iq_slots[valid_slots]
+    t_vals = t_slots[valid_slots]
+
+    if len(rx_vals) < 4:
+        return f_coarse_hz, 0.5
+
+    unit_phasors = rx_vals / np.abs(rx_vals)
+    dt_slots = np.round(np.diff(t_vals), 8)
+    idx1_0 = np.where(dt_slots == 1.0e-6)[0]
+    idx1_5 = np.where(dt_slots == 1.5e-6)[0]
+
+    f_fine_hz = 0.0
+    phase_noise_std = 0.5
+    if len(idx1_0) > 0:
+        p1_0 = unit_phasors[idx1_0 + 1] * np.conj(unit_phasors[idx1_0])
+        f_1_0 = float(np.angle(np.sum(p1_0)) / (2.0 * np.pi * 1.0e-6))
+        phase_noise_std = float(np.std(np.angle(p1_0)))
+        if len(idx1_5) > 0:
+            p1_5 = unit_phasors[idx1_5 + 1] * np.conj(unit_phasors[idx1_5])
+            f_1_5 = float(np.angle(np.sum(p1_5)) / (2.0 * np.pi * 1.5e-6))
+            f_fine_hz = (f_1_0 * len(idx1_0) + f_1_5 * len(idx1_5)) / (len(idx1_0) + len(idx1_5))
+        else:
+            f_fine_hz = f_1_0
+
+    return float(f_coarse_hz + f_fine_hz), phase_noise_std
+
+
 def calculate_freq_shift_and_phase_noise(
     rx_complex: np.ndarray,
     msg_bits: np.ndarray,
@@ -140,8 +211,9 @@ def calculate_freq_shift_and_phase_noise(
 ) -> Tuple[float, float]:
     """
     Estimates raw Carrier Frequency Offset (CFO in Hz) and unwrapped phase noise standard
-    deviation (rad) from the 10 MHz complex IQ frame. Supports both CRC-verified masks and
-    outlier-rejected blind energy masks for CRC-failed bursts.
+    deviation (rad) from the 10 MHz complex IQ frame. Automatically falls back to the
+    two-stage unwrap-free estimator when high CFO or multipath fading exceeds the legacy
+    `std(phasedelta1_0) < 0.45` gate.
     """
     bits_modulated_10mhz = (
         custom_mask_10mhz
@@ -166,49 +238,53 @@ def calculate_freq_shift_and_phase_noise(
     rx_meanvalues = rx_blocks[valid_mask]
     t_meanvalues = t_blocks[valid_mask]
 
-    if len(rx_meanvalues) < 2:
-        return float("nan"), float("nan")
+    if len(rx_meanvalues) >= 2:
+        time_diffs = np.round(np.diff(t_meanvalues), 8)
+        idx1_0 = np.where(time_diffs == 1.0e-6)[0]
+        idx1_5 = np.where(time_diffs == 1.5e-6)[0]
 
-    time_diffs = np.round(np.diff(t_meanvalues), 8)
-    idx1_0 = np.where(time_diffs == 1.0e-6)[0]
-    idx1_5 = np.where(time_diffs == 1.5e-6)[0]
+        if len(idx1_0) > 0:
+            phasedelta1_0 = rx_meanvalues[idx1_0 + 1] / rx_meanvalues[idx1_0]
+            phasedelta1_5 = (
+                rx_meanvalues[idx1_5 + 1] / rx_meanvalues[idx1_5]
+                if len(idx1_5) > 0
+                else np.array([])
+            )
 
-    if len(idx1_0) == 0:
-        return float("nan"), float("nan")
+            if np.std(phasedelta1_0) < 0.45:
+                f_measured1_0 = np.angle(np.mean(phasedelta1_0)) / (2.0 * np.pi * 1.0e-6)
+                if len(phasedelta1_5) > 0:
+                    f_measured1_5 = np.angle(np.mean(phasedelta1_5)) / (2.0 * np.pi * 1.5e-6)
+                    f_estimate_initial = (
+                        f_measured1_0 * len(idx1_0) + f_measured1_5 * len(idx1_5)
+                    ) / (len(idx1_0) + len(idx1_5))
+                else:
+                    f_estimate_initial = f_measured1_0
 
-    phasedelta1_0 = rx_meanvalues[idx1_0 + 1] / rx_meanvalues[idx1_0]
-    phasedelta1_5 = (
-        rx_meanvalues[idx1_5 + 1] / rx_meanvalues[idx1_5]
-        if len(idx1_5) > 0
-        else np.array([])
-    )
+                # Guard against 2*pi branch-cut aliasing on 1.0 us (+/-500 kHz) and 1.5 us (+/-333 kHz)
+                same_pulse = (bits_modulated_10mhz[:-1] == 1) & (bits_modulated_10mhz[1:] == 1)
+                if np.sum(same_pulse) >= 10:
+                    conj_1 = rx_slice[1:][same_pulse] * np.conj(rx_slice[:-1][same_pulse])
+                    f_coarse_check = float(np.angle(np.sum(conj_1)) / (2.0 * np.pi * 0.1e-6))
+                else:
+                    f_coarse_check = float(f_estimate_initial)
 
-    phase_std = float(np.std(np.angle(phasedelta1_0)))
-    threshold = 0.45
-    if np.std(phasedelta1_0) < threshold:
-        f_measured1_0 = np.angle(np.mean(phasedelta1_0)) / (2.0 * np.pi * 1.0e-6)
-        if len(phasedelta1_5) > 0:
-            f_measured1_5 = np.angle(np.mean(phasedelta1_5)) / (2.0 * np.pi * 1.5e-6)
-            f_estimate_initial = (
-                f_measured1_0 * len(idx1_0) + f_measured1_5 * len(idx1_5)
-            ) / (len(idx1_0) + len(idx1_5))
-        else:
-            f_estimate_initial = f_measured1_0
+                if abs(f_estimate_initial - f_coarse_check) < 150e3 and abs(f_coarse_check) < 300e3:
+                    rx_fcorr = rx_slice * np.exp(-1j * 2.0 * np.pi * f_estimate_initial * t_10mhz)
+                    active_mask = bits_modulated_10mhz == 1
+                    rx_part = rx_fcorr[active_mask]
+                    t_part = t_10mhz[active_mask]
 
-        rx_fcorr = rx_slice * np.exp(-1j * 2.0 * np.pi * f_estimate_initial * t_10mhz)
-        active_mask = bits_modulated_10mhz == 1
-        rx_part = rx_fcorr[active_mask]
-        t_part = t_10mhz[active_mask]
+                    rx_part_angle_unwrapped = np.unwrap(np.angle(rx_part))
+                    p = np.polyfit(t_part, rx_part_angle_unwrapped, deg=1)
+                    residuals = rx_part_angle_unwrapped - np.polyval(p, t_part)
+                    phase_noise_std = float(np.std(residuals))
 
-        rx_part_angle_unwrapped = np.unwrap(np.angle(rx_part))
-        p = np.polyfit(t_part, rx_part_angle_unwrapped, deg=1)
-        residuals = rx_part_angle_unwrapped - np.polyval(p, t_part)
-        phase_noise_std = float(np.std(residuals))
+                    f_estimate_2 = p[0] / (2.0 * np.pi)
+                    return float(f_estimate_initial + f_estimate_2), phase_noise_std
 
-        f_estimate_2 = p[0] / (2.0 * np.pi)
-        return float(f_estimate_initial + f_estimate_2), phase_noise_std
-
-    return float("nan"), phase_std
+    # Unwrap-free recovery when legacy gate fails
+    return recover_cfo_unwrap_free(rx_slice, msg_bits, fs_hz=10e6, custom_mask_10mhz=bits_modulated_10mhz)
 
 
 def calculate_freq_shift(rx_complex: np.ndarray, msg_bits: np.ndarray) -> float:
@@ -219,7 +295,7 @@ def calculate_freq_shift(rx_complex: np.ndarray, msg_bits: np.ndarray) -> float:
 
 def _sub_sample_corr_lag(sig_segment: np.ndarray, template_segment: np.ndarray) -> float:
     """
-    Computes the sub-sample lag (in samples) between `sig_segment` and `template_segment`
+    Computes sub-sample lag (in samples) between `sig_segment` and `template_segment`
     using zero-mean cross-correlation at lags [-1, 0, +1] and parabolic peak interpolation.
     """
     s = sig_segment - np.mean(sig_segment)
@@ -241,12 +317,9 @@ def estimate_timing_offset(
     custom_mask_10mhz: Optional[np.ndarray] = None,
 ) -> Tuple[float, float]:
     """
-    Extracts two physical-layer timing features for RF Fingerprinting:
-    1. `timing_offset_ppm`: Symbol clock frequency skew (parts per million) across the 120 us
-       frame by comparing the matched-filter sub-sample lag of the first half of the frame
-       (0..60 us) vs. the second half (60..120 us) against the pulse mask.
-    2. `sub_sample_lag_ns`: Sub-sample arrival time offset (in nanoseconds) via parabolic
-       interpolation around the preamble correlation peak.
+    Extracts two physical-layer timing features:
+    1. `timing_offset_ppm`: Symbol clock frequency skew (ppm) across the 120 us burst.
+    2. `sub_sample_lag_ns`: Sub-sample arrival time offset (ns) around the preamble correlation peak.
     """
     sub_sample_lag_ns = 0.0
     if corr_triplet is not None:
@@ -270,6 +343,74 @@ def estimate_timing_offset(
     return timing_offset_ppm, sub_sample_lag_ns
 
 
+def extract_waveform_transient_features(
+    iq_res: Optional[np.ndarray],
+) -> Tuple[float, float, float, float, float]:
+    """
+    Extracts 5 hardware-specific RF transmitter transient features directly from the 1,200-sample
+    (10 MS/s, 120 us) complex baseband waveform `iq_res`:
+      1. `pa_droop_db`: Power Amplifier (PA) storage-capacitor voltage sag from first 30 us to last 30 us (dB).
+      2. `pulse_crest_factor`: 95th-percentile peak to median active pulse top ratio (PA turn-on overshoot).
+      3. `phase_curvature_rad`: Quadratic phase chirp coefficient across the 120 us burst (PA thermal pulling).
+      4. `snr_db`: In-frame active pulse to off-chip noise floor ratio (dB).
+      5. `preamble_ratio_db`: Preamble-to-payload pulse amplitude balance (dB).
+    """
+    if iq_res is None or len(iq_res) < 400:
+        return 0.0, 1.2, 0.0, 20.0, 0.0
+
+    iq = np.asarray(iq_res[:1200], dtype=np.complex128)
+    env = np.abs(iq)
+    max_env = float(np.max(env))
+    if max_env <= 1e-12:
+        return 0.0, 1.2, 0.0, 0.0, 0.0
+
+    q55 = float(np.percentile(env, DEFAULT_ASSUMPTIONS.active_pulse_percentile))
+    q35 = float(np.percentile(env, DEFAULT_ASSUMPTIONS.noise_floor_percentile))
+    active_mask = env >= q55
+    noise_mask = env <= q35
+
+    active_vals = env[active_mask]
+    noise_vals = env[noise_mask]
+    mean_sig = float(np.median(active_vals)) if len(active_vals) > 0 else max_env
+    mean_noise = float(np.median(noise_vals)) if len(noise_vals) > 0 else (mean_sig * 0.05)
+
+    snr_db = float(20.0 * np.log10(max(mean_sig, 1e-12) / max(mean_noise, 1e-12)))
+    snr_db = float(np.clip(snr_db, 0.0, 60.0))
+
+    head_env = env[:300]
+    tail_env = env[-300:]
+    head_active = head_env[head_env >= np.percentile(head_env, 60)]
+    tail_active = tail_env[tail_env >= np.percentile(tail_env, 60)]
+    head_amp = float(np.median(head_active)) if len(head_active) > 0 else mean_sig
+    tail_amp = float(np.median(tail_active)) if len(tail_active) > 0 else mean_sig
+    pa_droop_db = float(20.0 * np.log10(max(head_amp, 1e-12) / max(tail_amp, 1e-12)))
+    pa_droop_db = float(np.clip(pa_droop_db, -6.0, 6.0))
+
+    p95 = float(np.percentile(active_vals, 95)) if len(active_vals) > 0 else mean_sig
+    pulse_crest_factor = float(np.clip(p95 / max(mean_sig, 1e-12), 1.0, 3.5))
+
+    if len(env) >= 80:
+        pre_pulses = np.concatenate([env[0:5], env[10:15], env[35:40], env[45:50]])
+        pre_amp = float(np.median(pre_pulses))
+        preamble_ratio_db = float(np.clip(20.0 * np.log10(max(pre_amp, 1e-12) / max(mean_sig, 1e-12)), -6.0, 6.0))
+    else:
+        preamble_ratio_db = 0.0
+
+    half = len(iq) // 2
+    iq_first = iq[:half]
+    iq_second = iq[half:]
+    act_1 = np.abs(iq_first[:-1]) >= q55
+    act_2 = np.abs(iq_second[:-1]) >= q55
+    if np.sum(act_1) >= 10 and np.sum(act_2) >= 10:
+        dphi_1 = np.angle(iq_first[1:][act_1] * np.conj(iq_first[:-1][act_1]))
+        dphi_2 = np.angle(iq_second[1:][act_2] * np.conj(iq_second[:-1][act_2]))
+        phase_curvature_rad = float(np.clip((np.median(dphi_2) - np.median(dphi_1)) * 10.0, -2.0, 2.0))
+    else:
+        phase_curvature_rad = 0.0
+
+    return pa_droop_db, pulse_crest_factor, phase_curvature_rad, snr_db, preamble_ratio_db
+
+
 def extract_blind_rf_features(
     iq_resampled: np.ndarray,
     envelope_frame: np.ndarray,
@@ -278,9 +419,8 @@ def extract_blind_rf_features(
     sample_rate: float = 10e6,
 ) -> Dict[str, float]:
     """
-    Extracts physical-layer RF fingerprint features (CFO, Symbol Clock Timing Offset,
-    Phase Noise, and Uncorrupted Slot Ratio) from a CRC-FAILED burst by masking out
-    low-contrast/collided bit slots so burst noise does not corrupt the oscillator estimate.
+    Extracts physical-layer RF fingerprint features from a CRC-failed burst by masking out
+    low-contrast/collided bit slots.
     """
     blind_mask, confident_slots = build_blind_energy_mask_10mhz(envelope_frame)
     cfo_raw_hz, phase_noise_std = calculate_freq_shift_and_phase_noise(
@@ -293,20 +433,29 @@ def extract_blind_rf_features(
         sample_rate=sample_rate,
         custom_mask_10mhz=blind_mask,
     )
+    pa_droop_db, crest_factor, phase_curv, snr_db, pre_ratio_db = extract_waveform_transient_features(
+        iq_resampled
+    )
     return {
         "CFO_Raw_Hz": float(cfo_raw_hz),
         "Phase_Noise_Std": float(phase_noise_std),
         "Timing_Offset_PPM": float(timing_offset_ppm),
         "Sub_Sample_Lag_Ns": float(sub_sample_lag_ns),
+        "PA_Droop_dB": float(pa_droop_db),
+        "Pulse_Crest_Factor": float(crest_factor),
+        "Phase_Curvature_Rad": float(phase_curv),
+        "SNR_dB": float(snr_db),
+        "Preamble_Ratio_dB": float(pre_ratio_db),
         "Clean_Slot_Ratio": float(np.mean(confident_slots)),
     }
 
 
 def lldistkm(latlon1: List[float], latlon2: List[float]) -> Tuple[float, float]:
     """
-    Computes Haversine distance (d1km) and equirectangular Pythagorean distance (d2km) in km.
+    Computes Haversine distance (`d1km`) and equirectangular Pythagorean distance (`d2km`) in km
+    using the IUGG mean spherical Earth radius (`6371.0088 km`).
     """
-    radius = 6371.0
+    radius = DEFAULT_ASSUMPTIONS.earth_mean_radius_km
     lat1, lon1 = np.radians(latlon1[0]), np.radians(latlon1[1])
     lat2, lon2 = np.radians(latlon2[0]), np.radians(latlon2[1])
 
@@ -323,14 +472,19 @@ def lldistkm(latlon1: List[float], latlon2: List[float]) -> Tuple[float, float]:
     return float(d1km), float(d2km)
 
 
-def compute_eirp_dbm(rx_power_dbm: float, distance_m: float, carrier_freq_hz: float = 1090e6) -> float:
+def compute_eirp_dbm(
+    rx_power_dbm: float,
+    distance_m: float,
+    carrier_freq_hz: float = DEFAULT_ASSUMPTIONS.carrier_freq_hz,
+) -> float:
     """
     Calculates estimated Equivalent Isotropically Radiated Power (EIRP in dBm)
-    by adding Free-Space Path Loss (FSPL) to the calibrated received power.
+    by adding Free-Space Path Loss (FSPL) to the calibrated received power:
+        FSPL(dB) = 20 * log10(4 * pi * d / lambda)
     """
     if np.isnan(rx_power_dbm) or np.isnan(distance_m) or distance_m <= 0:
         return float("nan")
-    lambda_c = 299792458.0 / carrier_freq_hz
+    lambda_c = DEFAULT_ASSUMPTIONS.speed_of_light_mps / carrier_freq_hz
     fspl_db = 20.0 * np.log10((4.0 * np.pi * distance_m) / lambda_c)
     return float(rx_power_dbm + fspl_db)
 
@@ -345,7 +499,7 @@ def compute_single_frame_doppler(
 ) -> float:
     """
     Computes expected kinematic Doppler frequency shift (Hz) at 1090 MHz for a single
-    position frame paired with the aircraft's current velocity vector.
+    position frame paired with the aircraft's velocity vector.
     """
     if (
         np.isnan(lat)
@@ -357,7 +511,7 @@ def compute_single_frame_doppler(
     ):
         return float("nan")
 
-    vel_m_s = airspeed_kt * 0.514444
+    vel_m_s = airspeed_kt * DEFAULT_ASSUMPTIONS.knots_to_mps
     lats, lons = config.rx_lat, config.rx_lon
 
     y = np.sin(np.radians(lons - lon)) * np.cos(np.radians(lats))
@@ -388,14 +542,9 @@ def find_valid_xcorr(
     capture_crc_failures: bool = False,
 ) -> List[Dict[str, Any]] | Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
-    Detects Mode-S DF17 frames via cross-correlation, verifies CRC-24 parity,
-    and extracts calibrated Rx power, high-res IQ slices, raw CFO, phase noise,
-    and timing offset features for RF fingerprinting.
-
-    When `capture_crc_failures=True`, also extracts blind physical-layer RF features
-    from genuine Mode-S RF bursts that pass preamble correlation and SNR gating but fail
-    the 24-bit CRC parity check, allowing the ML RF Fingerprinting classifier to identify
-    which aircraft transmitted them.
+    Detects Mode-S DF17 frames via extended preamble cross-correlation, verifies CRC-24 parity,
+    and extracts calibrated Rx power, high-res IQ slices, unwrap-free CFO, phase noise,
+    timing offset, and all 5 hardware transient features.
     """
     cfg = config or ReceiverConfig()
 
@@ -420,7 +569,7 @@ def find_valid_xcorr(
     cable_loss = cfg.cable_loss_db if amplifier_cable is None else amplifier_cable
 
     points = len(Z)
-    msg_length = int(fs_res * cfg.frame_duration_s)  # 1,200 samples at 10 MHz
+    msg_length = int(fs_res * cfg.frame_duration_s)
     if points < msg_length:
         return ([], []) if capture_crc_failures else []
 
@@ -448,7 +597,6 @@ def find_valid_xcorr(
     pow_df = 2 ** np.arange(4, -1, -1)
     pow_tc = 2 ** np.arange(4, -1, -1)
 
-    # Pass 1: Extract all CRC-valid Mode-S frames
     for peak_idx in valid_peaks:
         end_idx = peak_idx + msg_length
         mes_env = Z[peak_idx:end_idx]
@@ -500,6 +648,9 @@ def find_valid_xcorr(
         timing_offset_ppm, sub_sample_lag_ns = estimate_timing_offset(
             mes_env, bits_112, corr_triplet=corr_triplet, sample_rate=fs_res
         )
+        pa_droop_db, crest_factor, phase_curv, snr_db, pre_ratio_db = extract_waveform_transient_features(
+            iq_resampled
+        )
 
         valid_struct_list.append(
             {
@@ -513,16 +664,19 @@ def find_valid_xcorr(
                 "Phase_Noise_Std": float(phase_noise_std),
                 "Timing_Offset_PPM": float(timing_offset_ppm),
                 "Sub_Sample_Lag_Ns": float(sub_sample_lag_ns),
+                "PA_Droop_dB": float(pa_droop_db),
+                "Pulse_Crest_Factor": float(crest_factor),
+                "Phase_Curvature_Rad": float(phase_curv),
+                "SNR_dB": float(snr_db),
+                "Preamble_Ratio_dB": float(pre_ratio_db),
                 "CRC_Valid": True,
             }
         )
 
-    # Pass 2: Filter & extract genuine Mode-S RF bursts that failed CRC-24 (rejecting thermal noise peaks)
     failed_struct_list: List[Dict[str, Any]] = []
     if capture_crc_failures:
         accepted_failed_peaks: List[int] = []
         for peak_idx, bits_112 in failed_candidates_raw:
-            # Skip sidelobes overlapping within 120 us (1200 samples) of any CRC-valid frame
             if any(abs(peak_idx - vp) < msg_length for vp in valid_peak_indices):
                 continue
             if any(abs(peak_idx - fp) < msg_length for fp in accepted_failed_peaks):
@@ -531,13 +685,12 @@ def find_valid_xcorr(
             end_idx = peak_idx + msg_length
             mes_env = Z[peak_idx:end_idx]
 
-            # Normalized preamble correlation check (distinguishes real Mode-S preamble from noise)
             seg_head = mes_env[:len_template] - np.mean(mes_env[:len_template])
             seg_norm = float(np.linalg.norm(seg_head))
             if seg_norm < 1e-9:
                 continue
             norm_xcorr = float(np.dot(seg_head, preamble_ext_17) / (seg_norm * template_norm))
-            if norm_xcorr < 0.75:
+            if norm_xcorr < DEFAULT_ASSUMPTIONS.blind_preamble_xcorr_min:
                 continue
 
             iq_resampled = Inphase_res[peak_idx:end_idx] + 1j * Quadrature_res[peak_idx:end_idx]
@@ -550,7 +703,7 @@ def find_valid_xcorr(
                 iq_resampled, mes_env, bits_112, corr_triplet=corr_triplet, sample_rate=fs_res
             )
             if (
-                blind_feats["Clean_Slot_Ratio"] < 0.80
+                blind_feats["Clean_Slot_Ratio"] < DEFAULT_ASSUMPTIONS.blind_clean_slot_ratio_min
                 or np.isnan(blind_feats["CFO_Raw_Hz"])
             ):
                 continue
@@ -582,6 +735,11 @@ def find_valid_xcorr(
                     "Phase_Noise_Std": blind_feats["Phase_Noise_Std"],
                     "Timing_Offset_PPM": blind_feats["Timing_Offset_PPM"],
                     "Sub_Sample_Lag_Ns": blind_feats["Sub_Sample_Lag_Ns"],
+                    "PA_Droop_dB": blind_feats["PA_Droop_dB"],
+                    "Pulse_Crest_Factor": blind_feats["Pulse_Crest_Factor"],
+                    "Phase_Curvature_Rad": blind_feats["Phase_Curvature_Rad"],
+                    "SNR_dB": blind_feats["SNR_dB"],
+                    "Preamble_Ratio_dB": blind_feats["Preamble_Ratio_dB"],
                     "Clean_Slot_Ratio": blind_feats["Clean_Slot_Ratio"],
                     "Corrupted_ICAO_Hex": f"{raw_icao:06X}",
                     "Corrupted_DF": raw_df,

@@ -1,7 +1,7 @@
 """
-Online IQ Stream Reader and Polyphase Resampler.
-Replaces the legacy 1-second batch splicing loop (`for l_idx in range(k)`) with
-continuous single-pass or memory-mapped sliding-window online reading for a single measurement file.
+Online IQ Stream Reader and Polyphase Resampler (`src/adsb_rf/stream_reader.py`).
+Supports continuous single-pass or memory-mapped sliding-window online reading for `.npy`, `.mat`,
+or in-memory complex baseband arrays.
 """
 
 from dataclasses import dataclass
@@ -12,12 +12,13 @@ import numpy as np
 from scipy.io import loadmat, whosmat
 from scipy.signal import resample_poly
 
-from config import ReceiverConfig
+from .assumptions import ReceiverConfig
 
 
 @dataclass
 class IQStreamChunk:
     """Represents a continuous online IQ window with exact sample/time offset tracking."""
+
     iq_raw: np.ndarray
     inphase_res: np.ndarray
     quadrature_res: np.ndarray
@@ -29,7 +30,7 @@ class IQStreamChunk:
     overlap_samples_res: int = 0
 
     def to_resampled_dict(self) -> Dict[str, np.ndarray]:
-        """Compatibility dictionary matching legacy `resample_data()` output."""
+        """Compatibility dictionary matching `resample_data()` output."""
         return {
             "Inphase": self.inphase_res,
             "Quadrature": self.quadrature_res,
@@ -39,7 +40,7 @@ class IQStreamChunk:
 
 def resample_data(y_chunk: np.ndarray, new_fs: float, old_fs: float) -> Dict[str, np.ndarray]:
     """
-    Resamples a complex I/Q time-domain signal from old_fs to new_fs using polyphase filtering.
+    Resamples a complex I/Q time-domain signal from `old_fs` to `new_fs` using rational polyphase filtering.
     Returns a dictionary containing 'Inphase', 'Quadrature', and magnitude envelope 'Z'.
     """
     if np.isclose(new_fs, old_fs):
@@ -70,8 +71,8 @@ def resample_data(y_chunk: np.ndarray, new_fs: float, old_fs: float) -> Dict[str
 
 class OnlineIQStreamReader:
     """
-    Continuous / online reader for a single RF measurement file (.mat, .npy, or in-memory array).
-    Eliminates artificial 1-second batch splicing while preserving exact sample-accurate timestamps.
+    Continuous / online reader for a single RF measurement file (`.mat`, `.npy`, or in-memory array).
+    Preserves sample-accurate timestamps and supports memory-mapped `.npy` streaming.
     """
 
     def __init__(
@@ -111,16 +112,14 @@ class OnlineIQStreamReader:
 
         suffix = path.suffix.lower()
         if suffix == ".npy":
-            # Memory-mapped online reading: avoids loading massive arrays into RAM all at once
             self._iq_buffer = np.load(path, mmap_mode="r")
             if self._iq_buffer.ndim > 1:
                 self._iq_buffer = np.squeeze(self._iq_buffer)
         elif suffix == ".mat":
-            # Inspect metadata first
             try:
-                vars_info = {name: shape for name, shape, _ in whosmat(str(path))}
+                _ = {name: shape for name, shape, _ in whosmat(str(path))}
             except Exception:
-                vars_info = {}
+                pass
             mat = loadmat(str(path))
             if "XDelta" in mat:
                 xdelta = float(np.squeeze(mat["XDelta"]))
@@ -142,10 +141,7 @@ class OnlineIQStreamReader:
         return self.total_samples / self.raw_sample_rate_hz
 
     def read_continuous(self) -> IQStreamChunk:
-        """
-        Reads and resamples the entire single measurement in one continuous online pass
-        (no 1-second loop splicing). Ideal when processing a single measurement file.
-        """
+        """Reads and resamples the entire measurement in a single continuous pass."""
         assert self._iq_buffer is not None
         resampled = resample_data(
             self._iq_buffer,
@@ -166,10 +162,7 @@ class OnlineIQStreamReader:
 
     def stream_online(self, window_duration_s: Optional[float] = None) -> Iterator[IQStreamChunk]:
         """
-        Generator that yields continuous IQ chunks with an automatic 120 us frame-overlap guard band.
-        If `window_duration_s` is None (default for single measurement files), yields the entire
-        measurement in a single continuous pass; otherwise streams sliding windows without dropping
-        boundary frames.
+        Generator yielding continuous IQ chunks with an automatic 120 us frame-overlap guard band.
         """
         assert self._iq_buffer is not None
         total = self.total_samples

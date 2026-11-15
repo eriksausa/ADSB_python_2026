@@ -1,5 +1,5 @@
 """
-Mode-S / ADS-B Bitstream Decoder and Online Stateful Aircraft Tracker.
+Mode-S / ADS-B Bitstream Decoder and Online Stateful Aircraft Tracker (`src/adsb_rf/decoder.py`).
 Decodes DF17 Callsigns (TC 1-4), Airborne Positions (TC 9-18) with both local and
 globally unambiguous Even/Odd CPR, and Airborne Velocities (TC 19), while computing
 Doppler shifts, residual Carrier Frequency Offsets (CFO), EIRP, and kinematic deltas online.
@@ -9,8 +9,8 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 import numpy as np
 
-from config import ReceiverConfig
-from dsp import compute_eirp_dbm, compute_single_frame_doppler, lldistkm
+from .assumptions import DEFAULT_ASSUMPTIONS, ReceiverConfig
+from .dsp import compute_eirp_dbm, compute_single_frame_doppler, lldistkm
 
 
 def NL(lat: float) -> int:
@@ -21,12 +21,12 @@ def NL(lat: float) -> int:
     if np.isnan(lat):
         return 1
     abs_lat = np.abs(lat)
-    if abs_lat >= 87.0:
+    if abs_lat >= DEFAULT_ASSUMPTIONS.cpr_polar_boundary_deg:
         return 1
     if abs_lat == 0.0:
         return 59
 
-    nz = 15.0
+    nz = DEFAULT_ASSUMPTIONS.cpr_lat_zones_nz
     a = 1.0 - np.cos(np.pi / (2.0 * nz))
     b = np.cos(np.radians(lat)) ** 2
     ratio = 1.0 - a / b
@@ -76,7 +76,9 @@ def ADSB_altitude(bits_12: np.ndarray) -> float:
 
 
 def ADSB_position(
-    bits_36: np.ndarray, rx_lat: float = 48.196674, rx_lon: float = 16.370998
+    bits_36: np.ndarray,
+    rx_lat: float = DEFAULT_ASSUMPTIONS.rx_lat,
+    rx_lon: float = DEFAULT_ASSUMPTIONS.rx_lon,
 ) -> List[float]:
     """
     Locally unambiguous CPR position decoding relative to receiver antenna coordinates.
@@ -91,7 +93,7 @@ def ADSB_position(
     lon_c = float(np.dot(a[19:36], pow_17))
 
     j = np.floor(rx_lat / dlat) + np.floor(
-        (np.fmod(rx_lat, dlat) / dlat) - (lat_c / (2 ** 17)) + 0.5
+        (np.mod(rx_lat, dlat) / dlat) - (lat_c / (2 ** 17)) + 0.5
     )
     lat = dlat * (j + (lat_c / (2 ** 17)))
 
@@ -99,7 +101,7 @@ def ADSB_position(
     dlon = 360.0 if (nl_lat - e_o) <= 0 else 360.0 / (nl_lat - e_o)
 
     m = np.floor(rx_lon / dlon) + np.floor(
-        (np.fmod(rx_lon, dlon) / dlon) - (lon_c / (2 ** 17)) + 0.5
+        (np.mod(rx_lon, dlon) / dlon) - (lon_c / (2 ** 17)) + 0.5
     )
     lon = dlon * (m + (lon_c / (2 ** 17)))
 
@@ -107,7 +109,7 @@ def ADSB_position(
         np.cos(np.radians(rx_lat)) * np.cos(np.radians(lat)) * np.cos(np.radians(rx_lon - lon))
         + np.sin(np.radians(rx_lat)) * np.sin(np.radians(lat))
     )
-    dist_km = 6378.0 * np.arccos(np.clip(cos_arg, -1.0, 1.0))
+    dist_km = DEFAULT_ASSUMPTIONS.earth_mean_radius_km * np.arccos(np.clip(cos_arg, -1.0, 1.0))
     return [float(lat), float(lon), e_o, float(dist_km)]
 
 
@@ -129,12 +131,12 @@ def two_message_position(even_frame: Dict[str, Any], odd_frame: Dict[str, Any]) 
     dlat_e = 6.0
     dlat_o = 360.0 / 59.0
 
-    lat_e = dlat_e * (np.fmod(j, 60.0) + cpr_lat_even)
-    lat_o = dlat_o * (np.fmod(j, 59.0) + cpr_lat_odd)
+    lat_e = dlat_e * (np.mod(j, 60.0) + cpr_lat_even)
+    lat_o = dlat_o * (np.mod(j, 59.0) + cpr_lat_odd)
 
-    if lat_e > 270.0:
+    if lat_e >= 270.0:
         lat_e -= 360.0
-    if lat_o > 270.0:
+    if lat_o >= 270.0:
         lat_o -= 360.0
 
     zone_valid = NL(lat_e) == NL(lat_o)
@@ -146,13 +148,13 @@ def two_message_position(even_frame: Dict[str, Any], odd_frame: Dict[str, Any]) 
         ni = max(NL(lat_e), 1)
         dlon = 360.0 / ni
         m = np.floor(cpr_lon_even * (NL(lat_e) - 1) - cpr_lon_odd * NL(lat_e) + 0.5)
-        lon = dlon * (np.fmod(m, ni) + cpr_lon_even)
+        lon = dlon * (np.mod(m, ni) + cpr_lon_even)
     else:
         lat = lat_o
         ni = max(NL(lat_o) - 1, 1)
         dlon = 360.0 / ni
         m = np.floor(cpr_lon_even * (NL(lat_e) - 1) - cpr_lon_odd * NL(lat_o) + 0.5)
-        lon = dlon * (np.fmod(m, ni) + cpr_lon_odd)
+        lon = dlon * (np.mod(m, ni) + cpr_lon_odd)
 
     if lon > 180.0:
         lon -= 360.0
@@ -215,6 +217,7 @@ def ADSB_velocity(bits_51: np.ndarray) -> List[float]:
 @dataclass
 class AircraftOnlineState:
     """In-memory state per ICAO address for online Doppler, CPR, and kinematic jump tracking."""
+
     icao_hex: str
     callsign: Optional[str] = None
     last_airspeed_kt: float = float("nan")
@@ -226,6 +229,8 @@ class AircraftOnlineState:
     last_lat: Optional[float] = None
     last_lon: Optional[float] = None
     last_alt_ft: Optional[float] = None
+    last_slant_distance_m: float = float("nan")
+    last_doppler_hz: float = float("nan")
     last_frame_timestamp: Optional[float] = None
     frame_count: int = 0
 
@@ -235,12 +240,11 @@ class OnlineADSBDecoder:
     Stateful online Mode-S / ADS-B decoder.
     Processes raw detected frames one-by-one as they arrive from the stream reader,
     maintaining per-aircraft velocity and CPR state to compute Doppler, CFO, EIRP,
-    and kinematic jump metrics immediately without batch post-processing.
+    and kinematic jump metrics causally without batch post-processing.
     """
 
-    # 17-bit CPR quantization grid resolution (~5.1 m lat, ~7.5 m lon -> 15 m combined tolerance)
-    CPR_QUANTIZATION_TOLERANCE_KM: float = 0.015
-    ALT_QUANTIZATION_TOLERANCE_FT: float = 25.0
+    CPR_QUANTIZATION_TOLERANCE_KM: float = DEFAULT_ASSUMPTIONS.cpr_quantization_deadband_km
+    ALT_QUANTIZATION_TOLERANCE_FT: float = DEFAULT_ASSUMPTIONS.alt_quantization_deadband_ft
 
     def __init__(self, config: Optional[ReceiverConfig] = None):
         self.config = config or ReceiverConfig()
@@ -268,17 +272,20 @@ class OnlineADSBDecoder:
         )
         state.last_frame_timestamp = timestamp
 
-        # Default telemetry fields
         callsign = state.callsign
         altitude_ft = float("nan")
         lat = float("nan")
         lon = float("nan")
         even_odd: Optional[int] = None
-        slant_distance_m = float("nan")
-        doppler_hz = float("nan")
+        slant_distance_m = state.last_slant_distance_m
+        doppler_hz = state.last_doppler_hz
         cfo_raw_hz = float(raw_struct.get("CFO_Raw_Hz", float("nan")))
-        freq_offset_hz = cfo_raw_hz
-        eirp_dbm = float("nan")
+        freq_offset_hz = float(cfo_raw_hz - doppler_hz) if (not np.isnan(cfo_raw_hz) and not np.isnan(doppler_hz)) else cfo_raw_hz
+        eirp_dbm = (
+            compute_eirp_dbm(float(raw_struct["Power"]), slant_distance_m, self.config.carrier_freq_hz)
+            if not np.isnan(slant_distance_m)
+            else float("nan")
+        )
         airspeed_kt = state.last_airspeed_kt
         heading_deg = state.last_heading_deg
         vertical_fpm = state.last_vertical_fpm
@@ -298,7 +305,6 @@ class OnlineADSBDecoder:
             pos = ADSB_position(bits[52:88], self.config.rx_lat, self.config.rx_lon)
             lat, lon, even_odd, ground_dist_km = pos[0], pos[1], int(pos[2]), pos[3]
 
-            # Update Even/Odd CPR state and check global 2-message position consistency
             if even_odd == 0:
                 state.last_even_frame = raw_struct
             else:
@@ -309,13 +315,13 @@ class OnlineADSBDecoder:
                 cpr_zone_valid = cpr_res["cpr_zone_valid"]
 
             dist_m = ground_dist_km * 1000.0
-            alt_m = max(altitude_ft, 0.0) * 0.3048
+            alt_m = max(altitude_ft, 0.0) * DEFAULT_ASSUMPTIONS.feet_to_meters
             slant_distance_m = float(np.sqrt(dist_m ** 2 + alt_m ** 2))
+            state.last_slant_distance_m = slant_distance_m
             eirp_dbm = compute_eirp_dbm(
                 float(raw_struct["Power"]), slant_distance_m, self.config.carrier_freq_hz
             )
 
-            # Online kinematic jump tracking relative to previous position of this aircraft
             if (
                 state.last_pos_timestamp is not None
                 and state.last_lat is not None
@@ -325,7 +331,6 @@ class OnlineADSBDecoder:
                 if dt_pos > 1e-4:
                     d_km, _ = lldistkm([state.last_lat, state.last_lon], [lat, lon])
                     pos_jump_km = d_km
-                    # Subtract 17-bit CPR quantization deadband (15 m) so sub-grid rounding isn't mistaken for motion
                     eff_km = max(0.0, d_km - self.CPR_QUANTIZATION_TOLERANCE_KM)
                     implied_groundspeed_kt = float((eff_km / dt_pos) * 1943.844)
                     if state.last_alt_ft is not None and not np.isnan(altitude_ft):
@@ -339,10 +344,12 @@ class OnlineADSBDecoder:
             state.last_lon = lon
             state.last_alt_ft = altitude_ft
 
-            # Online Doppler & Doppler-compensated Carrier Frequency Offset (CFO)
-            doppler_hz = compute_single_frame_doppler(
+            dop_curr = compute_single_frame_doppler(
                 lat, lon, altitude_ft, airspeed_kt, heading_deg, self.config
             )
+            if not np.isnan(dop_curr):
+                doppler_hz = dop_curr
+                state.last_doppler_hz = doppler_hz
             if not np.isnan(cfo_raw_hz) and not np.isnan(doppler_hz):
                 freq_offset_hz = float(cfo_raw_hz - doppler_hz)
 
@@ -364,7 +371,7 @@ class OnlineADSBDecoder:
             state.last_vertical_fpm = vertical_fpm
 
             if state.last_lat is not None and state.last_lon is not None and state.last_alt_ft is not None:
-                doppler_hz = compute_single_frame_doppler(
+                dop_curr = compute_single_frame_doppler(
                     state.last_lat,
                     state.last_lon,
                     state.last_alt_ft,
@@ -372,6 +379,9 @@ class OnlineADSBDecoder:
                     heading_deg,
                     self.config,
                 )
+                if not np.isnan(dop_curr):
+                    doppler_hz = dop_curr
+                    state.last_doppler_hz = doppler_hz
                 if not np.isnan(cfo_raw_hz) and not np.isnan(doppler_hz):
                     freq_offset_hz = float(cfo_raw_hz - doppler_hz)
 
@@ -406,6 +416,11 @@ class OnlineADSBDecoder:
             "Timing_Offset_PPM": float(raw_struct.get("Timing_Offset_PPM", 0.0)),
             "Sub_Sample_Lag_Ns": float(raw_struct.get("Sub_Sample_Lag_Ns", 0.0)),
             "Phase_Noise_Std": float(raw_struct.get("Phase_Noise_Std", float("nan"))),
+            "PA_Droop_dB": float(raw_struct.get("PA_Droop_dB", float("nan"))),
+            "Pulse_Crest_Factor": float(raw_struct.get("Pulse_Crest_Factor", float("nan"))),
+            "Phase_Curvature_Rad": float(raw_struct.get("Phase_Curvature_Rad", float("nan"))),
+            "SNR_dB": float(raw_struct.get("SNR_dB", float("nan"))),
+            "Preamble_Ratio_dB": float(raw_struct.get("Preamble_Ratio_dB", float("nan"))),
             "Inter_Arrival_s": float(inter_arrival_s),
             "CPR_Zone_Valid": bool(cpr_zone_valid),
             "Pos_Jump_km": float(pos_jump_km),

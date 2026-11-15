@@ -1,21 +1,18 @@
 """
-Visualization Module for ADS-B RF Fingerprinting & Anomaly Detection.
-Includes:
-1. `map_planes`: Interactive HTML map (via Folium if installed, or standalone Leaflet.js HTML)
-   with normal vs. anomalous/spoofed aircraft trajectory markers.
-2. `plot_rf_fingerprint_clusters`: 2D scatter plot of Carrier Frequency Offset (kHz) vs.
-   Symbol Clock Timing Offset (ppm) by ICAO transponder with anomaly highlights and
-   CRC-failed bursts attributed via Blind RF Fingerprinting.
-3. `plot_iq_new`: Time-domain I/Q/Amplitude/Phase and single-sided FFT spectra.
-4. `plot_eye_diagram`: Mode-S PPM eye diagram visualizer.
+Visualization Module for ADS-B RF Fingerprinting & Anomaly Detection (`src/adsb_rf/visualization.py`).
 """
 
 import json
+import os
 from pathlib import Path
+import tempfile
 from typing import Any, Dict, List, Optional
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+
+os.environ.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "mplconfig_adsb"))
+
+from .assumptions import DEFAULT_ASSUMPTIONS
 
 try:
     import folium
@@ -27,8 +24,8 @@ except ImportError:
 def map_planes(
     messages: List[Dict[str, Any]],
     output_html: str | Path = "adsb_map.html",
-    rx_lat: float = 48.196674,
-    rx_lon: float = 16.370998,
+    rx_lat: float = DEFAULT_ASSUMPTIONS.rx_lat,
+    rx_lon: float = DEFAULT_ASSUMPTIONS.rx_lon,
 ) -> Path:
     """
     Generates an interactive HTML map of decoded aircraft positions, highlighting
@@ -46,11 +43,11 @@ def map_planes(
 
     if HAS_FOLIUM:
         fmap = folium.Map(
-    location=[rx_lat, rx_lon], 
-    zoom_start=9, 
-    tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-    attr="Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community"
-)
+            location=[rx_lat, rx_lon],
+            zoom_start=9,
+            tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+            attr="Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community",
+        )
 
         folium.Marker(
             location=[rx_lat, rx_lon],
@@ -170,10 +167,10 @@ def plot_rf_fingerprint_clusters(
 ) -> Path:
     """
     Plots the 2D physical-layer RF Fingerprint feature space:
-    Carrier Frequency Offset (kHz) vs. Symbol Clock Timing Offset (ppm),
-    grouped by aircraft ICAO, highlighting both Spoofed/Anomalous frames and
-    CRC-Failed bursts attributed via Blind RF Fingerprinting.
+    Carrier Frequency Offset (kHz) vs. Symbol Clock Timing Offset (ppm).
     """
+    import matplotlib.pyplot as plt
+
     out_path = Path(save_path)
     fig, ax = plt.subplots(figsize=(10.5, 6.2), dpi=150)
 
@@ -201,7 +198,6 @@ def plot_rf_fingerprint_clusters(
             linewidth=0.7,
         )
 
-    # Overlay CRC-failed bursts attributed purely via Blind RF Fingerprinting
     if crc_failed_df is not None and not crc_failed_df.empty:
         crc_df = crc_failed_df.dropna(subset=["freq_offset_hz", "timing_offset_ppm"]).copy()
         crc_df["cfo_khz"] = crc_df["freq_offset_hz"] / 1e3
@@ -216,16 +212,6 @@ def plot_rf_fingerprint_clusters(
             linewidth=1.2,
             zorder=4,
         )
-        for _, row in crc_df.iterrows():
-            ax.annotate(
-                f"CRC-Fail -> {row['predicted_icao_hex']} ({row['rf_confidence']*100:.0f}%)",
-                (row["cfo_khz"], row["timing_offset_ppm"]),
-                textcoords="offset points",
-                xytext=(8, -10),
-                fontsize=8,
-                color="#023047",
-                weight="bold",
-            )
 
     if not anom_df.empty:
         ax.scatter(
@@ -239,17 +225,6 @@ def plot_rf_fingerprint_clusters(
             linewidth=1.0,
             zorder=5,
         )
-        for _, row in anom_df.iterrows():
-            reason_short = str(row["anomaly_reasons"]).split("(")[0].strip()
-            ax.annotate(
-                f"{row['icao_hex']}: {reason_short}",
-                (row["cfo_khz"], row["timing_offset_ppm"]),
-                textcoords="offset points",
-                xytext=(8, 6),
-                fontsize=8,
-                color="#9b0000",
-                weight="bold",
-            )
 
     ax.set_title(
         "ADS-B Transponder RF Fingerprinting: Valid Frames, Spoofing & Blind CRC-Failed Attribution",
@@ -259,7 +234,8 @@ def plot_rf_fingerprint_clusters(
     ax.set_xlabel("Doppler-Compensated Carrier Frequency Offset (kHz)", fontsize=11)
     ax.set_ylabel("Symbol Clock Timing Offset (ppm)", fontsize=11)
     ax.grid(True, linestyle="--", alpha=0.4)
-    ax.legend(loc="best", frameon=True, fontsize=8.5)
+    if normal_df["icao_hex"].nunique() <= 15:
+        ax.legend(loc="best", frameon=True, fontsize=8.5)
     plt.tight_layout()
     fig.savefig(out_path)
     plt.close(fig)
@@ -269,12 +245,14 @@ def plot_rf_fingerprint_clusters(
 def plot_iq_new(
     messages: List[Dict[str, Any]],
     timestamp: Optional[float] = None,
-    fs: float = 12.8e6,
+    fs: float = DEFAULT_ASSUMPTIONS.default_raw_sample_rate_hz,
     save_path: Optional[str | Path] = None,
 ) -> Optional[Path]:
     """
-    Plots time-domain Inphase, Quadrature, Amplitude envelope, Phase, and single-sided FFT spectra.
+    Plots time-domain Inphase, Quadrature, Amplitude envelope, and Phase.
     """
+    import matplotlib.pyplot as plt
+
     if not messages:
         return None
 
@@ -314,6 +292,8 @@ def plot_eye_diagram(
     save_path: Optional[str | Path] = None,
 ) -> Optional[Path]:
     """Plots an eye diagram for a Mode-S PPM signal."""
+    import matplotlib.pyplot as plt
+
     samples_per_symbol = int(round(pulse_duration_us * msps))
     window_size = samples_per_symbol * 2
     step_size = samples_per_symbol

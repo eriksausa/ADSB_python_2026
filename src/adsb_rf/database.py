@@ -1,8 +1,11 @@
 """
-Relational SQL Database Module for ADS-B RF Fingerprinting and Telemetry Storage.
-Uses local DuckDB (`duckdb`) as the primary analytical SQL engine with an automatic,
-zero-friction fallback to `sqlite3` when running in minimal environments, and clean
-SQL abstraction ready to upgrade to PostgreSQL / MotherDuck.
+Relational SQL Database Module for ADS-B RF Fingerprinting and Telemetry Storage
+(`src/adsb_rf/database.py`).
+
+Uses local DuckDB (`duckdb`) as the primary analytical SQL engine with an automatic
+fallback to `sqlite3` when running in minimal environments. Sanitizes file paths to
+basenames only (preventing local username/path leakage) and persists all 12 physical-layer
+RF features in `adsb_frames`.
 """
 
 import math
@@ -34,10 +37,18 @@ def _clean_sql_val(val: Any) -> Any:
     return val
 
 
+def _sanitize_source_label(source_file: str | Path) -> str:
+    """Strips local filesystem directory paths so only the file basename or synthetic label is stored."""
+    raw = str(source_file).strip()
+    if not raw:
+        return "unknown_source"
+    return Path(raw.replace("\\", "/")).name
+
+
 class ADSBDatabase:
     """
-    Analytical SQL storage layer for online ADS-B telemetry, physical-layer RF fingerprints,
-    ML anomaly detection results, and blind RF attribution of CRC-failed bursts.
+    Analytical SQL storage layer for online ADS-B telemetry, 12-feature physical-layer RF
+    fingerprints, ML anomaly detection results, and blind RF attribution of CRC-failed bursts.
     """
 
     def __init__(self, db_path: str | Path = "adsb_rf_telemetry.duckdb"):
@@ -98,6 +109,11 @@ class ADSBDatabase:
                 timing_offset_ppm DOUBLE,
                 sub_sample_lag_ns DOUBLE,
                 phase_noise_std DOUBLE,
+                pa_droop_db DOUBLE,
+                pulse_crest_factor DOUBLE,
+                phase_curvature_rad DOUBLE,
+                snr_db DOUBLE,
+                preamble_ratio_db DOUBLE,
                 inter_arrival_s DOUBLE,
                 cpr_zone_valid BOOLEAN,
                 pos_jump_km DOUBLE,
@@ -176,9 +192,10 @@ class ADSBDatabase:
         total_samples: int,
         duration_s: float,
     ) -> int:
-        """Inserts a measurement session record and returns its `measurement_id`."""
+        """Inserts a measurement session record (storing only the sanitized basename) and returns `measurement_id`."""
         meas_id = self._next_meas_id
         self._next_meas_id += 1
+        safe_source = _sanitize_source_label(source_file)
         self.conn.cursor().execute(
             """
             INSERT INTO measurements (
@@ -188,7 +205,7 @@ class ADSBDatabase:
             """,
             (
                 meas_id,
-                str(source_file),
+                safe_source,
                 float(carrier_freq_hz),
                 float(raw_sample_rate_hz),
                 float(target_sample_rate_hz),
@@ -233,6 +250,11 @@ class ADSBDatabase:
             _clean_sql_val(frame.get("Timing_Offset_PPM")),
             _clean_sql_val(frame.get("Sub_Sample_Lag_Ns")),
             _clean_sql_val(frame.get("Phase_Noise_Std")),
+            _clean_sql_val(frame.get("PA_Droop_dB")),
+            _clean_sql_val(frame.get("Pulse_Crest_Factor")),
+            _clean_sql_val(frame.get("Phase_Curvature_Rad")),
+            _clean_sql_val(frame.get("SNR_dB")),
+            _clean_sql_val(frame.get("Preamble_Ratio_dB")),
             _clean_sql_val(frame.get("Inter_Arrival_s")),
             bool(frame.get("CPR_Zone_Valid", True)),
             _clean_sql_val(frame.get("Pos_Jump_km")),
@@ -248,8 +270,8 @@ class ADSBDatabase:
         self.conn.cursor().execute(
             """
             INSERT INTO adsb_frames VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             """,
             row,
@@ -295,7 +317,11 @@ class ADSBDatabase:
         self.refresh_aircraft_profiles()
 
     def update_ml_predictions(self, frames: List[Dict[str, Any]]) -> None:
-        """Updates ML RF fingerprinting classifications and anomaly flags in `adsb_frames`."""
+        """
+        Updates ML RF fingerprinting classifications, anomaly flags, AND any recovered
+        physical-layer features (`cfo_raw_hz`, `freq_offset_hz`, `eirp_dbm`, transient features)
+        in `adsb_frames`.
+        """
         cur = self.conn.cursor()
         for f in frames:
             if "frame_id" not in f:
@@ -303,7 +329,18 @@ class ADSBDatabase:
             cur.execute(
                 """
                 UPDATE adsb_frames
-                SET predicted_icao_hex = ?,
+                SET distance_m = COALESCE(?, distance_m),
+                    eirp_dbm = COALESCE(?, eirp_dbm),
+                    doppler_hz = COALESCE(?, doppler_hz),
+                    cfo_raw_hz = COALESCE(?, cfo_raw_hz),
+                    freq_offset_hz = COALESCE(?, freq_offset_hz),
+                    phase_noise_std = COALESCE(?, phase_noise_std),
+                    pa_droop_db = COALESCE(?, pa_droop_db),
+                    pulse_crest_factor = COALESCE(?, pulse_crest_factor),
+                    phase_curvature_rad = COALESCE(?, phase_curvature_rad),
+                    snr_db = COALESCE(?, snr_db),
+                    preamble_ratio_db = COALESCE(?, preamble_ratio_db),
+                    predicted_icao_hex = ?,
                     rf_match_prob = ?,
                     anomaly_score = ?,
                     is_anomaly = ?,
@@ -311,6 +348,17 @@ class ADSBDatabase:
                 WHERE frame_id = ?
                 """,
                 (
+                    _clean_sql_val(f.get("Distance_from_Rx")),
+                    _clean_sql_val(f.get("EIRP_dBm")),
+                    _clean_sql_val(f.get("Doppler")),
+                    _clean_sql_val(f.get("CFO_Raw_Hz")),
+                    _clean_sql_val(f.get("Frequency_shift")),
+                    _clean_sql_val(f.get("Phase_Noise_Std")),
+                    _clean_sql_val(f.get("PA_Droop_dB")),
+                    _clean_sql_val(f.get("Pulse_Crest_Factor")),
+                    _clean_sql_val(f.get("Phase_Curvature_Rad")),
+                    _clean_sql_val(f.get("SNR_dB")),
+                    _clean_sql_val(f.get("Preamble_Ratio_dB")),
                     _clean_sql_val(f.get("Predicted_ICAO_Hex")),
                     _clean_sql_val(f.get("RF_Match_Prob")),
                     _clean_sql_val(f.get("Anomaly_Score")),
@@ -324,9 +372,7 @@ class ADSBDatabase:
 
     def refresh_aircraft_profiles(self) -> pd.DataFrame:
         """
-        Recomputes per-aircraft RF fingerprint summary statistics in SQL
-        (mean/std of Carrier Frequency Offset, Timing Offset, EIRP, anomaly counts, and
-        count of CRC-failed bursts attributed to each aircraft).
+        Recomputes per-aircraft RF fingerprint summary statistics in SQL.
         """
         cur = self.conn.cursor()
         cur.execute("DELETE FROM aircraft_rf_profiles;")
@@ -386,7 +432,7 @@ class ADSBDatabase:
         return pd.DataFrame(rows, columns=cols)
 
     def export_csv(self, filename: str = "adsb_table.csv") -> pd.DataFrame:
-        """Exports the full `adsb_frames` table to CSV (replacing legacy `create_table()`)."""
+        """Exports the full `adsb_frames` table to CSV."""
         df = self.query_df("SELECT * FROM adsb_frames ORDER BY timestamp ASC")
         df.to_csv(filename, index=False)
         return df

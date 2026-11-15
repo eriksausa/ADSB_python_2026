@@ -7,20 +7,37 @@ Origin: 2026 Machine Learning & Deep Learning expansion of Erik Šauša's B.Sc. 
         ("Analysis of Modulation Parameters of Surveillance Systems ADS-B and SSR",
         Institute of Telecommunications, TU Wien / Vienna University of Technology).
 
-Loads the TU Wien Rooftop Capture telemetry (`adsb_table.csv` — 2,809 CRC-valid frames
-from 268M I/Q samples at 12.80 MS/s) for interactive exploration and live physical-layer
-spoofing simulation.
+Single UI entry point importing the modular `src/adsb_rf/` package. Loads the TU Wien
+Rooftop Capture telemetry (`adsb_table.csv` — 2,809 CRC-valid frames across 174 distinct
+ICAO addresses from 268M I/Q samples at 12.80 MS/s) for leak-free evaluation, ablation
+analysis, and residual-driven spoofing simulation.
 
 Run locally:
     streamlit run streamlit_app.py
 """
 
 from pathlib import Path
+import sys
+
+ROOT_DIR = Path(__file__).resolve().parent
+SRC_DIR = ROOT_DIR / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
+
+from adsb_rf import (
+    DEFAULT_ASSUMPTIONS,
+    build_aircraft_profiles_from_df,
+    compute_reconciliation_and_headline_metrics,
+    get_assumptions_table_rows,
+    run_ablation_suite,
+    score_simulated_burst_with_residuals,
+)
 
 st.set_page_config(
     page_title="ADS-B RF Fingerprinting & ML Spoofing Detector | Erik Šauša",
@@ -28,7 +45,6 @@ st.set_page_config(
     layout="wide",
 )
 
-# High-contrast 20-color palette compatible with all Matplotlib versions (including 3.9+)
 CLUSTER_PALETTE_20 = [
     "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
     "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
@@ -38,7 +54,7 @@ CLUSTER_PALETTE_20 = [
 
 
 # =============================================================================
-# CACHED TELEMETRY LOADER & HARDWARE PROFILE AGGREGATION
+# CACHED TELEMETRY, BACKTEST & ABLATION LOADERS (DELEGATED TO `src/adsb_rf/`)
 # =============================================================================
 
 @st.cache_data(show_spinner=False)
@@ -50,46 +66,22 @@ def load_rooftop_csv_telemetry(csv_path_str: str) -> pd.DataFrame:
     return df
 
 
-def build_aircraft_profiles_from_df(df: pd.DataFrame) -> pd.DataFrame:
-    """Computes per-aircraft physical-layer RF fingerprint centroids and standard deviations."""
-    profiles = []
-    for icao_hex, grp in df.groupby("icao_hex"):
-        clean_grp = (
-            grp[~grp["is_anomaly"].astype(bool)]
-            if "is_anomaly" in grp.columns and (~grp["is_anomaly"].astype(bool)).any()
-            else grp
-        )
-        cs_series = grp["callsign"].dropna() if "callsign" in grp.columns else pd.Series(dtype=str)
-        cs_valid = [str(c) for c in cs_series if str(c).strip() not in ("", "None", "N/A", "nan")]
-        callsign = cs_valid[-1] if cs_valid else "N/A"
+@st.cache_data(show_spinner="Computing per-aircraft RF profiles...")
+def get_cached_profiles(df: pd.DataFrame) -> pd.DataFrame:
+    """Delegates aircraft profile computation to `adsb_rf.evaluation.build_aircraft_profiles_from_df`."""
+    return build_aircraft_profiles_from_df(df)
 
-        cfo_vals = clean_grp["freq_offset_hz"].dropna() if "freq_offset_hz" in clean_grp.columns else pd.Series(dtype=float)
-        ppm_vals = clean_grp["timing_offset_ppm"].dropna() if "timing_offset_ppm" in clean_grp.columns else pd.Series(dtype=float)
-        eirp_vals = clean_grp["eirp_dbm"].dropna() if "eirp_dbm" in clean_grp.columns else pd.Series(dtype=float)
-        pnoise_vals = (
-            clean_grp["phase_noise_std"].dropna()
-            if "phase_noise_std" in clean_grp.columns
-            else pd.Series(dtype=float)
-        )
 
-        profiles.append(
-            {
-                "icao_hex": str(icao_hex),
-                "callsign": callsign,
-                "frame_count": int(len(grp)),
-                "mean_cfo_khz": round(float(cfo_vals.median() / 1e3), 3) if len(cfo_vals) > 0 else 0.0,
-                "std_cfo_khz": round(float(max(cfo_vals.std(ddof=0) if len(cfo_vals) > 1 else 1000.0, 1000.0) / 1e3), 3),
-                "mean_timing_ppm": round(float(ppm_vals.median()), 2) if len(ppm_vals) > 0 else 0.0,
-                "std_timing_ppm": round(float(max(ppm_vals.std(ddof=0) if len(ppm_vals) > 1 else 25.0, 25.0)), 2),
-                "mean_eirp_dbm": round(float(eirp_vals.median()), 2) if len(eirp_vals) > 0 else 54.0,
-                "std_eirp_dbm": round(float(max(eirp_vals.std(ddof=0) if len(eirp_vals) > 1 else 2.0, 2.0)), 2),
-                "mean_phase_noise_rad": round(float(pnoise_vals.median()), 3) if len(pnoise_vals) > 0 else 0.30,
-            }
-        )
-    prof_df = pd.DataFrame(profiles)
-    if not prof_df.empty:
-        prof_df = prof_df.sort_values("frame_count", ascending=False).reset_index(drop=True)
-    return prof_df
+@st.cache_data(show_spinner="Running leak-free 80/20 Holdout, 5-Fold CV & Out-of-Time backtests...")
+def get_cached_headline_metrics(df: pd.DataFrame) -> dict:
+    """Computes live leak-free metrics and out-of-fold residual uncertainty from `adsb_table.csv`."""
+    return compute_reconciliation_and_headline_metrics(df)
+
+
+@st.cache_data(show_spinner="Running CFO vs. Hardware & Ensemble Member Ablations...")
+def get_cached_ablations(df: pd.DataFrame, min_frames: int) -> dict:
+    """Runs the feature and ensemble member ablation suites via `adsb_rf.evaluation.run_ablation_suite`."""
+    return run_ablation_suite(df, min_frames=min_frames)
 
 
 # =============================================================================
@@ -97,8 +89,7 @@ def build_aircraft_profiles_from_df(df: pd.DataFrame) -> pd.DataFrame:
 # =============================================================================
 
 def main() -> None:
-    base_dir = Path(__file__).resolve().parent
-    csv_path = base_dir / "adsb_table.csv"
+    csv_path = ROOT_DIR / "adsb_table.csv"
 
     # --- Header & Author Attribution ---
     st.title("📡 1090 MHz ADS-B Physical-Layer RF Fingerprinting & Spoofing Detection")
@@ -109,70 +100,111 @@ def main() -> None:
         "\"Analysis of Modulation Parameters of Surveillance Systems ADS-B and SSR.\"*"
     )
 
+    # --- Explicit Data Provenance, Public Benchmarks & Synthetic Demo Notice ---
+    st.warning(
+        "⚠️ **Data Provenance, Privacy & Synthetic Simulation Notice:**  \n"
+        "* **Real Over-the-Air Rooftop Capture (`adsb_table.csv`)**: Contains **2,809 CRC-valid Mode-S frames** "
+        "(174 distinct ICAO hex addresses) demodulated from a single **20.97-second ($268{,}434{,}198$-sample at $12.80\\text{ MS/s}$)** "
+        "complex baseband capture recorded on the roof of the TU Wien Telecommunications Institute using a Keysight UXA N9040B Vector Signal Analyzer. "
+        "All aircraft identifiers are public commercial aviation broadcasts governed by **ICAO Annex 10 (Vol. IV)** and **RTCA DO-260B**; "
+        "zero private or PII data are present.  \n"
+        "* **Interactive Spoofing Simulator & Fallback Mode**: The sidebar **Live RF Spoofing Simulator** injects **synthetic/simulated RF bursts** "
+        "with user-controlled oscillator/timing offsets and evaluates them using empirical **5-fold out-of-fold backtest residuals** from the real dataset. "
+        "Similarly, when the raw 2.0 GB `.npy` capture is absent, `main.py` provides an explicitly labeled synthetic I/Q generator (`src/adsb_rf/synthesizer.py`)."
+    )
+
     # --- Abstract & Project Motivation Card ---
     st.info(
-        "**Abstract & Why This Matters (The Core Problem):**  \n"
+        "**Abstract & Physical-Layer Security Motivation:**  \n"
         "Modern Air Traffic Control relies on **ADS-B** (*Automatic Dependent Surveillance–Broadcast* at $1090\\text{ MHz}$), "
         "where aircraft broadcast their GPS coordinates, altitude, velocity, and 24-bit ICAO identity every half-second. "
-        "However, **ADS-B has zero cryptographic authentication**: anyone with a $300 Software-Defined Radio (SDR) can "
+        "However, **ADS-B has zero cryptographic authentication**: anyone with a \\$300 Software-Defined Radio (SDR) can "
         "broadcast spoofed digital messages claiming to be a commercial airliner or inject ghost aircraft onto radar screens.  \n\n"
         "**The Physical-Layer Solution:**  \n"
         "While digital bits are trivial to forge, an attacker cannot easily replicate the microscopic **analog hardware imperfections** "
         "of a specific aircraft's 250W–500W Mode-S transponder—such as crystal local oscillator carrier frequency offset (CFO), "
         "Manchester $2\\text{ MHz}$ symbol clock drift (ppm), power amplifier (PA) storage-capacitor voltage droop, turn-on overshoot, "
-        "and phase noise. This project extracts a **12-dimensional physical-layer RF fingerprint** from every $120\\,\\mu\\text{s}$ burst "
-        "to authenticate the transmitting aircraft hardware and detect spoofing without relying on the digital payload."
+        "and phase noise. This pipeline extracts a **12-dimensional physical-layer RF fingerprint** (`src/adsb_rf/`) from every $120\\,\\mu\\text{s}$ burst "
+        "to authenticate the transmitting aircraft hardware and flag spoofing anomalies."
     )
-
-    with st.expander("📖 Evolution of the Project: 2019 TU Wien B.Sc. Thesis ➔ 2026 ML & Neural Network Expansion"):
-        st.markdown(
-            """
-            * **Stage 1 — 2018–2019 B.Sc. Thesis at TU Wien (MATLAB & Keysight UXA N9040B VSA)**:
-              * Recorded live $1090\\text{ MHz}$ complex baseband I/Q signals ($12.8\\text{ MS/s}$) from a $5.5\\text{ dBi}$ collinear antenna on the roof of the TU Wien Telecommunications Institute in Vienna.
-              * Built the complete physical-layer DSP & Mode-S decoder from scratch: preamble cross-correlation, Pulse Position Modulation (PPM) bit slicing, modulo-2 `CRC-24` parity verification, Compact Position Reporting (CPR) trajectory decoding, Free-Space Path Loss (FSPL) transmit power estimation, and spherical-geometry Doppler shift compensation.
-              * *2019 Finding*: Proved that no *single* modulation parameter in isolation (frequency offset alone, power alone, or timestamp periodicity alone) uniquely identifies an aircraft across an entire airspace.
-            * **Stage 2 — 2026 Machine Learning & Deep Learning Expansion (Python 3.12, Scikit-Learn & PyTorch)**:
-              * **Unwrap-Free Two-Stage CFO Recovery**: Solved high-offset phase wrapping across pulse gaps by combining intra-pulse $0.1\\,\\mu\\text{s}$ conjugate products ($\\pm 5.0\\text{ MHz}$ unambiguous range) with derotated $1.0\\,\\mu\\text{s}$ / $1.5\\,\\mu\\text{s}$ unit-phasor refinement, plus per-aircraft kinematic Doppler/EIRP interpolation across `TC 4` (Callsign), `TC 11` (Position), and `TC 19` (Velocity) frames.
-              * **12-Feature Hardware Fingerprint Vector**: Expanded the signal representation to 12 physical features including PA envelope sag (`PA_Droop_dB`), turn-on overshoot (`Pulse_Crest_Factor`), thermal frequency pulling (`Phase_Curvature_Rad`), and symbol clock drift (`Timing_Offset_PPM`).
-              * **Hybrid ML Ensemble & Neural Networks**: Combined a supervised **RandomForest + ExtraTrees + Bayesian Mahalanobis Posterior** ensemble with a **PyTorch Deep Autoencoder** (`RFAnomalyAutoencoder`, $12 \\rightarrow 24 \\rightarrow 3 \\rightarrow 24 \\rightarrow 12$) and a **1D Raw-I/Q Convolutional Neural Network** (`IQConvNet1D`), boosting multi-aircraft classification accuracy to **90.6%** (**100.0% Top-3 accuracy**) across 2,809 real frames from the Vienna rooftop capture.
-            """
-        )
 
     if not csv_path.exists():
         st.error(f"Telemetry file `{csv_path.name}` not found. Run `python main.py` first to generate `adsb_table.csv`.")
         return
 
     df = load_rooftop_csv_telemetry(str(csv_path))
-    prof_df = build_aircraft_profiles_from_df(df)
+    prof_df = get_cached_profiles(df)
+    metrics_bundle = get_cached_headline_metrics(df)
+    res_unc = metrics_bundle["residual_uncertainty"]
 
     # --- Sidebar Author & Controls ---
     st.sidebar.markdown("### 👨‍💻 **Erik Šauša, Dipl.-Ing.**")
     st.sidebar.caption("M.Sc. & B.Sc. in Telecommunications & Information Engineering — TU Wien")
     st.sidebar.markdown("---")
-    st.sidebar.header("⚙️ Security Gate & Spoofing Simulator")
+    st.sidebar.header("⚙️ Evaluation Tier & Security Gate")
+
+    tier_choice = st.sidebar.radio(
+        "Benchmark Class Eligibility Tier:",
+        [
+            f"All Enrolled (>=5 clean frames: {metrics_bundle['tier5']['n_classes']} classes)",
+            f"Well-Enrolled (>=12 clean frames: {metrics_bundle['tier12']['n_classes']} classes, ~70)",
+        ],
+        index=0,
+        help="Selects whether top-level KPIs display all 115 aircraft with >=5 clean frames (minimum for 5-fold CV) or the 72 well-enrolled aircraft (~70 classes) with >=12 clean frames.",
+    )
+    active_tier = metrics_bundle["tier5"] if ">=5" in tier_choice else metrics_bundle["tier12"]
+
     outlier_z = st.sidebar.slider(
         "Mahalanobis Spoofing Gate (σ):",
         min_value=2.5,
         max_value=6.0,
-        value=4.5,
+        value=float(DEFAULT_ASSUMPTIONS.outlier_z_threshold),
         step=0.1,
         help="Frames whose physical-layer RF vector sits further than this many standard deviations from their claimed aircraft's hardware centroid are flagged as spoofing.",
     )
 
-    # --- Top KPI Row ---
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("CRC-Valid Frames", f"{len(df):,}")
-    c2.metric("Distinct Aircraft (ICAOs)", f"{len(prof_df)}")
-    c3.metric("80/20 Holdout Test Acc", "90.6%")
-    c4.metric("5-Fold CV Accuracy", "90.3%")
-    c5.metric("Top-3 RF Match Acc", "100.0%")
+    # --- Live Reproducible Top KPI Row (Zero Hardcoded Numbers) ---
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1.metric(
+        "CRC-Valid Frames",
+        f"{metrics_bundle['total_frames']:,}",
+        delta=f"{metrics_bundle['clean_frames']:,} clean / {metrics_bundle['anom_frames']} anom",
+        delta_color="off",
+    )
+    c2.metric(
+        "Evaluated Classes",
+        f"{active_tier['n_classes']} / {metrics_bundle['total_icaos']}",
+        delta=f"{active_tier['n_frames']:,} eval frames",
+        delta_color="off",
+    )
+    c3.metric(
+        "80/20 Holdout Acc",
+        f"{active_tier['holdout_top1']*100:.2f}%",
+        delta=f"Top-3: {active_tier['holdout_top3']*100:.2f}%",
+    )
+    c4.metric(
+        "5-Fold Stratified CV",
+        f"{active_tier['cv_top1']*100:.2f}%",
+        delta=f"Top-3: {active_tier['cv_top3']*100:.2f}%",
+    )
+    c5.metric(
+        "Out-of-Time Split Acc",
+        f"{active_tier['oot_top1']*100:.2f}%",
+        delta=f"Top-3: {active_tier['oot_top3']*100:.2f}%",
+    )
+    c6.metric(
+        "Exported CSV Match",
+        f"{metrics_bundle['all_match_rate']*100:.2f}%",
+        delta=f"{metrics_bundle['clean_inlier_fit']*100:.1f}% on clean inliers",
+        delta_color="off",
+    )
 
     # --- Sidebar Interactive Spoofing Simulator ---
     st.sidebar.markdown("---")
-    st.sidebar.subheader("🛡️ Live RF Spoofing Simulator")
+    st.sidebar.subheader("🛡️ Live RF Spoofing Simulator (Synthetic)")
     st.sidebar.caption(
         "Simulate an SDR transmitter broadcasting a fake ADS-B frame claiming to be one of the enrolled aircraft, "
-        "and test whether the Physical-Layer Mahalanobis + Ensemble gate catches it."
+        "and test it against the Physical-Layer Mahalanobis gate + empirical out-of-fold residual intervals."
     )
 
     enrolled_list = prof_df["icao_hex"].tolist() if not prof_df.empty else ["4D00D7"]
@@ -206,10 +238,21 @@ def main() -> None:
         sim_ppm = st.sidebar.slider("Symbol Clock Drift (ppm):", -300.0, 300.0, spoof_default_ppm, 1.0)
         sim_eirp = st.sidebar.slider("Estimated EIRP (dBm):", 20.0, 75.0, round(default_eirp + 4.0, 1), 0.5)
 
+    sim_verdict = score_simulated_burst_with_residuals(
+        prof_df=prof_df,
+        target_icao=target_icao,
+        sim_cfo_khz=sim_cfo_khz,
+        sim_ppm=sim_ppm,
+        sim_eirp_dbm=sim_eirp,
+        outlier_z=outlier_z,
+        residual_uncertainty=res_unc,
+    )
+
     # --- Dashboard Tabs ---
-    tab1, tab2, tab3, tab4 = st.tabs(
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(
         [
             "🎯 RF Fingerprint Clusters & Spoofing Gate",
+            "🧪 Ablation Study, Assumptions & Limitations",
             "🗺️ Vienna Airspace Trajectory Map",
             "📊 Aircraft Hardware RF Profiles",
             "📈 I/Q Waveform, Spectrum & Eye Diagram",
@@ -217,27 +260,7 @@ def main() -> None:
     )
 
     with tab1:
-        col_left, col_right = st.columns([2.1, 1.0])
-
-        if not prof_df.empty:
-            z_cfo = (sim_cfo_khz - prof_df["mean_cfo_khz"].values) / np.maximum(prof_df["std_cfo_khz"].values, 1.0)
-            z_ppm = (sim_ppm - prof_df["mean_timing_ppm"].values) / np.maximum(prof_df["std_timing_ppm"].values, 25.0)
-            z_eirp = (sim_eirp - prof_df["mean_eirp_dbm"].values) / np.maximum(prof_df["std_eirp_dbm"].values, 2.0)
-
-            d_all = np.sqrt(0.50 * (z_cfo ** 2) + 0.35 * (z_ppm ** 2) + 0.15 * (z_eirp ** 2))
-            target_idx = int(prof_df.index[prof_df["icao_hex"] == target_icao][0])
-            d_claimed = float(d_all[target_idx])
-            best_idx = int(np.argmin(d_all))
-            pred_icao = str(prof_df.loc[best_idx, "icao_hex"])
-            pred_cs = str(prof_df.loc[best_idx, "callsign"])
-
-            log_lik = -0.5 * (d_all ** 2)
-            lik_shift = np.exp(log_lik - np.max(log_lik))
-            post_probs = lik_shift / (np.sum(lik_shift) + 1e-12)
-            claimed_prob = float(0.65 * post_probs[target_idx] + 0.35 * np.exp(-0.5 * (d_claimed ** 2)))
-            is_spoof = d_claimed > outlier_z or (pred_icao != target_icao and d_claimed > 3.2 and claimed_prob < 0.10)
-        else:
-            d_claimed, claimed_prob, pred_icao, pred_cs, is_spoof = 0.0, 1.0, target_icao, "N/A", False
+        col_left, col_right = st.columns([2.1, 1.05])
 
         with col_left:
             upper_bound = min(25, max(4, len(prof_df)))
@@ -272,6 +295,25 @@ def main() -> None:
                     color=color_hex,
                 )
 
+            # Plot empirical 90% backtest residual error bars around the claimed aircraft centroid
+            if target_row is not None:
+                cfo_err_bar = float(target_row.get("cfo_iqr_90_khz", res_unc["cfo_err_p90_khz"]))
+                ppm_err_bar = float(target_row.get("ppm_iqr_90", res_unc["ppm_err_p90"]))
+                ax.errorbar(
+                    [default_cfo],
+                    [default_ppm],
+                    xerr=[[cfo_err_bar]],
+                    yerr=[[ppm_err_bar]],
+                    fmt="o",
+                    color="#1d3557",
+                    ecolor="#1d3557",
+                    elinewidth=1.8,
+                    capsize=5,
+                    zorder=9,
+                    label=f"Claimed {target_icao} Centroid ±90% Residual CI",
+                )
+
+            is_spoof = sim_verdict["is_spoof"]
             ax.scatter(
                 [sim_cfo_khz],
                 [sim_ppm],
@@ -303,42 +345,134 @@ def main() -> None:
             st.markdown(
                 f"""
                 * **Claimed Aircraft**: `{target_icao}` (`{target_row['callsign'] if target_row is not None else 'N/A'}`)
-                * **Enrolled Hardware Centroid**:
-                  * Median CFO: `{default_cfo:+.2f} kHz`
-                  * Median Timing Skew: `{default_ppm:+.1f} ppm`
+                * **Enrolled Hardware Centroid (±90% Empirical Residual CI)**:
+                  * Median CFO: `{default_cfo:+.2f} ± {sim_verdict['cfo_ci90_khz']:.2f} kHz`
+                  * Median Timing Skew: `{default_ppm:+.1f} ± {sim_verdict['ppm_ci90']:.1f} ppm`
                   * Median EIRP: `{default_eirp:.1f} dBm`
                 * **Simulated Burst Measurements**:
                   * Burst CFO: `{sim_cfo_khz:+.2f} kHz` ($\\Delta = {sim_cfo_khz - default_cfo:+.2f}\\text{{ kHz}}$)
                   * Burst Timing Skew: `{sim_ppm:+.1f} ppm` ($\\Delta = {sim_ppm - default_ppm:+.1f}\\text{{ ppm}}$)
                   * Burst EIRP: `{sim_eirp:.1f} dBm`
-                * **ML Security Metrics**:
-                  * **Mahalanobis Distance ($d_M$)**: `{d_claimed:.2f} σ` (Gate: `{outlier_z:.1f} σ`)
-                  * **Hardware Match Probability**: `{claimed_prob*100:.1f}%`
-                  * **Closest RF Emitter Match**: `{pred_icao}` (`{pred_cs}`)
+                * **Residual-Calibrated Security Metrics**:
+                  * **Mahalanobis Distance ($d_M$)**: `{sim_verdict['d_claimed']:.2f} σ`
+                  * **90% Residual-Propagated Band**: `[{sim_verdict['d_ci_low']:.2f} σ, {sim_verdict['d_ci_high']:.2f} σ]`
+                  * **Configured Gate / 95% OOF Inlier Bound**: `{outlier_z:.1f} σ` / `{sim_verdict['oof_p95_gate']:.2f} σ`
+                  * **Hardware Match Probability**: `{sim_verdict['claimed_prob']*100:.1f}%`
+                  * **Closest RF Emitter Match**: `{sim_verdict['pred_icao']}` (`{sim_verdict['pred_cs']}`)
                 """
             )
 
     with tab2:
+        st.subheader("1️⃣ Metric Reconciliation: 100.0% Clean Inlier Fit vs. 86.54% CSV Match vs. Leak-Free OOS")
+        st.markdown(
+            "Reconciles the **in-sample training fit on clean inliers (`100.00%`)**, the **overall exported CSV match rate (`86.54%`)** "
+            "(which includes `413` flagged physical-layer anomalies where `d_M > 4.5 σ`), and the **leak-free out-of-sample evaluations** "
+            "across both the **115-class ($\ge 5$ clean frames)** and **72-class (~70 classes, $\ge 12$ clean frames)** tiers."
+        )
+        t5 = metrics_bundle["tier5"]
+        t12 = metrics_bundle["tier12"]
+        reconcile_df = pd.DataFrame(
+            [
+                {
+                    "Evaluation Scope": "In-Sample Clean Inlier Fit (is_anomaly == 0)",
+                    "Evaluated Frames": f"{metrics_bundle['clean_frames']:,} / {metrics_bundle['clean_frames']:,}",
+                    "Evaluated Classes": f"{metrics_bundle['clean_icaos']} ICAOs",
+                    "Top-1 Accuracy": f"{metrics_bundle['clean_inlier_fit']*100:.2f}%",
+                    "Top-3 Accuracy": "100.00%",
+                    "Notes": f"In-sample training fit ({metrics_bundle['clean_match_count']}/{metrics_bundle['clean_frames']} clean frames match).",
+                },
+                {
+                    "Evaluation Scope": "All-Frame Exported CSV Match (adsb_table.csv)",
+                    "Evaluated Frames": f"{metrics_bundle['all_match_count']:,} / {metrics_bundle['total_frames']:,}",
+                    "Evaluated Classes": f"{metrics_bundle['total_icaos']} ICAOs",
+                    "Top-1 Accuracy": f"{metrics_bundle['all_match_rate']*100:.2f}%",
+                    "Top-3 Accuracy": "N/A (includes outliers)",
+                    "Notes": f"Includes {metrics_bundle['anom_frames']} flagged anomalies (where only {metrics_bundle['anom_match_count']}/{metrics_bundle['anom_frames']} match).",
+                },
+                {
+                    "Evaluation Scope": "Leak-Free 80/20 Stratified Holdout (All Enrolled >=5)",
+                    "Evaluated Frames": f"{t5['n_frames']:,} (461 test)",
+                    "Evaluated Classes": f"{t5['n_classes']} classes",
+                    "Top-1 Accuracy": f"{t5['holdout_top1']*100:.2f}%",
+                    "Top-3 Accuracy": f"{t5['holdout_top3']*100:.2f}%",
+                    "Notes": "Fold-isolated imputation, centroids & trees across all aircraft with >=5 clean frames.",
+                },
+                {
+                    "Evaluation Scope": "Leak-Free 5-Fold Stratified CV (All Enrolled >=5)",
+                    "Evaluated Frames": f"{t5['n_frames']:,} (100% OOF)",
+                    "Evaluated Classes": f"{t5['n_classes']} classes",
+                    "Top-1 Accuracy": f"{t5['cv_top1']*100:.2f}%",
+                    "Top-3 Accuracy": f"{t5['cv_top3']*100:.2f}%",
+                    "Notes": "5-fold out-of-fold evaluation across all 115 enrolled classes.",
+                },
+                {
+                    "Evaluation Scope": "Chronological Out-of-Time Split (All Enrolled >=5)",
+                    "Evaluated Frames": f"{t5['n_frames']:,} (80% early -> 20% late)",
+                    "Evaluated Classes": f"{t5['n_classes']} classes",
+                    "Top-1 Accuracy": f"{t5['oot_top1']*100:.2f}%",
+                    "Top-3 Accuracy": f"{t5['oot_top3']*100:.2f}%",
+                    "Notes": "Trained on first 80% of each aircraft's timeline, tested on final 20%.",
+                },
+                {
+                    "Evaluation Scope": "Leak-Free 80/20 Holdout (Well-Enrolled >=12, ~70 classes)",
+                    "Evaluated Frames": f"{t12['n_frames']:,} (397 test)",
+                    "Evaluated Classes": f"{t12['n_classes']} classes (~70)",
+                    "Top-1 Accuracy": f"{t12['holdout_top1']*100:.2f}%",
+                    "Top-3 Accuracy": f"{t12['holdout_top3']*100:.2f}%",
+                    "Notes": f"Well-enrolled aircraft tier (>=12 clean frames/aircraft -> {t12['n_classes']} classes).",
+                },
+                {
+                    "Evaluation Scope": "Leak-Free 5-Fold Stratified CV (Well-Enrolled >=12, ~70 classes)",
+                    "Evaluated Frames": f"{t12['n_frames']:,} (100% OOF)",
+                    "Evaluated Classes": f"{t12['n_classes']} classes (~70)",
+                    "Top-1 Accuracy": f"{t12['cv_top1']*100:.2f}%",
+                    "Top-3 Accuracy": f"{t12['cv_top3']*100:.2f}%",
+                    "Notes": f"5-fold out-of-fold evaluation on the {t12['n_classes']}-class (~70-class) subset.",
+                },
+            ]
+        )
+        st.dataframe(reconcile_df, use_container_width=True, hide_index=True)
+
+        abl_dict = get_cached_ablations(df, min_frames=active_tier["min_frames"])
+        st.subheader(f"2️⃣ Feature Group Ablation: CFO vs. Hardware Transient & Clock Features ({active_tier['n_classes']} Classes)")
+        st.dataframe(abl_dict["feature_ablation_df"], use_container_width=True, hide_index=True)
+
+        st.subheader(f"3️⃣ Ensemble Member Ablation: Mahalanobis vs. RandomForest vs. ExtraTrees ({active_tier['n_classes']} Classes)")
+        st.dataframe(abl_dict["ensemble_ablation_df"], use_container_width=True, hide_index=True)
+
+        st.subheader("4️⃣ Explicit Physical, DSP & Modeling Assumptions (`src/adsb_rf/assumptions.py`)")
+        st.dataframe(pd.DataFrame(get_assumptions_table_rows()), use_container_width=True, hide_index=True)
+
+        st.subheader("5️⃣ Honest Limitations & Operational Scope")
+        st.markdown(
+            """
+            1. **Single 20.97-Second Capture Window**: All `2,809` frames originate from one continuous `20.97 s` rooftop recording ($268.4\\text{M}$ samples at $12.8\\text{ MS/s}$). Within $21\\text{ seconds}$, transponder crystal oscillator temperature, supply voltage, and line-of-sight channel geometry are quasi-stationary. Cross-day re-identification requires continuous Kalman/EWMA centroid tracking as aircraft climb from $+20^\\circ\\text{C}$ to $-55^\\circ\\text{C}$ at cruise altitude.
+            2. **CFO Includes Residual Doppler When Kinematics Are Missing**: At $1090\\text{ MHz}$, radial motion induces up to $f_D = \\pm (v/c) f_c \\approx \\pm 900\\text{ Hz}$ of Doppler shift for subsonic commercial airliners. While our pipeline explicitly subtracts spherical-geometry Doppler (`compute_single_frame_doppler`) whenever CPR position (`TC 9–18`) and velocity (`TC 19`) frames are decoded, aircraft that only broadcast identification or altitude frames during the capture retain uncompensated radial Doppler in `Frequency_shift`. The **Feature Group Ablation** above isolates `CFO Only` vs. `Hardware & Clock Features Only (No CFO)` to quantify this dependency transparently.
+            3. **Evaluated Class Counts (`174` Total vs. `115` Enrolled vs. `72` [~70] Well-Enrolled)**: Of the `174` distinct ICAOs decoded (`161` with clean inliers), `46` clean aircraft transmitted fewer than 5 frames in $20.97\\text{ s}$ and cannot populate a 5-fold stratified split. All headline metrics state the exact evaluated frame and class counts (`115` classes at $\\ge 5$ frames; `72` classes [~70 classes] at $\\ge 12$ frames).
+            """
+        )
+
+    with tab3:
         st.subheader("🗺️ Interactive Mode-S / ADS-B Trajectory Map (TU Wien Receiver)")
-        map_file = base_dir / "adsb_map.html"
+        map_file = ROOT_DIR / "adsb_map.html"
         if map_file.exists():
             components.html(map_file.read_text(encoding="utf-8"), height=560, scrolling=False)
         else:
             st.info("Run `python main.py` to generate `adsb_map.html`.")
 
-    with tab3:
+    with tab4:
         st.subheader("✈️ Enrolled Aircraft RF Fingerprint Profiles")
         st.caption(
             "Aggregated per-aircraft physical-layer hardware profiles across the 20.97-second TU Wien rooftop capture "
-            "(sorted by number of received frames)."
+            "(sorted by number of received frames, including 90% empirical residual intervals)."
         )
         st.dataframe(prof_df, use_container_width=True, hide_index=True)
 
-    with tab4:
+    with tab5:
         st.subheader("📈 Physical-Layer Baseband I/Q Waveform & Mode-S PPM Eye Diagram")
         col_iq, col_eye = st.columns(2)
-        iq_png = base_dir / "iq_spectrum_sample.png"
-        eye_png = base_dir / "eye_diagram_sample.png"
+        iq_png = ROOT_DIR / "iq_spectrum_sample.png"
+        eye_png = ROOT_DIR / "eye_diagram_sample.png"
 
         with col_iq:
             if iq_png.exists():
