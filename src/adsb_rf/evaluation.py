@@ -11,6 +11,7 @@ Provides:
 6. Reconciliation of in-sample clean inlier fit (100.0%) vs. exported CSV match rate (86.5%)
 """
 
+import gc
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
@@ -178,6 +179,7 @@ def evaluate_subset_metrics(
     for mm in member_modes:
         p_m, _ = predict_fold_ensemble(b_80, X_raw[te_20], override_mode=mm)
         member_holdout_top1[mm] = float(np.mean(np.argmax(p_m, axis=1) == y_idx[te_20]))
+    del b_80, probs_20
 
     # --- 2. 5-Fold Stratified Cross-Validation ---
     if HAS_SKLEARN:
@@ -232,6 +234,7 @@ def evaluate_subset_metrics(
             )
 
         oof_total += len(va_i)
+        del fb, f_probs, f_dists
 
     cv_top1 = float(oof_top1_hits / max(oof_total, 1))
     cv_top3 = float(oof_top3_hits / max(oof_total, 1))
@@ -271,6 +274,8 @@ def evaluate_subset_metrics(
             "oot_top1": float(np.mean(np.argmax(p_oot_m, axis=1) == y_idx[oot_te])),
             "cv_top3": float(member_cv_top3_hits[mm] / max(oof_total, 1)),
         }
+    del b_oot, probs_oot
+    gc.collect()
 
     return {
         "holdout_top1": holdout_top1,

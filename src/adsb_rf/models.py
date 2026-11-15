@@ -13,7 +13,6 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from .assumptions import DEFAULT_ASSUMPTIONS, AnomalyThresholds
-from .deep_models import train_pytorch_models
 from .features import (
     RF_FEATURE_NAMES,
     RF_MAHALANOBIS_WEIGHTS,
@@ -112,8 +111,8 @@ def fit_fold_ensemble(
                     (
                         "rf_clf",
                         RandomForestClassifier(
-                            n_estimators=100,
-                            max_depth=18,
+                            n_estimators=65,
+                            max_depth=17,
                             min_samples_leaf=1,
                             max_features="sqrt",
                             class_weight=None,
@@ -133,8 +132,8 @@ def fit_fold_ensemble(
                     (
                         "et_clf",
                         ExtraTreesClassifier(
-                            n_estimators=100,
-                            max_depth=20,
+                            n_estimators=65,
+                            max_depth=19,
                             min_samples_leaf=1,
                             max_features="sqrt",
                             class_weight=None,
@@ -763,6 +762,8 @@ class ADSBAnomalyDetector:
             [self.rf_classifier.class_to_idx_.get(str(f["ICAO_Hex"]).strip().upper(), 0) for f in train_frames],
             dtype=np.int64,
         )
+
+        from .deep_models import train_pytorch_models
 
         torch_out = train_pytorch_models(
             train_frames=train_frames,
