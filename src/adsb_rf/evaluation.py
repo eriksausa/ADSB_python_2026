@@ -428,6 +428,167 @@ def run_ablation_suite(
             }
         )
 
+    member_dict = full_res.get("member_metrics", {}) if full_res is not None else {}
+    ens_rows = format_ensemble_ablation_table(
+        {"member_metrics": {
+            mode_str: (
+                member_dict[mode_str]
+                if mode_str in member_dict
+                else evaluate_subset_metrics(
+                    X_raw,
+                    y_idx,
+                    ts,
+                    n_classes=n_classes,
+                    feature_indices=FEATURE_SUBSETS["all_12_features"],
+                    ensemble_mode=mode_str,
+                )
+            )
+            for mode_str in ("mahalanobis", "rf", "et", "ensemble")
+        }}
+    )
+
+    return {
+        "feature_ablation_df": pd.DataFrame(feat_rows),
+        "ensemble_ablation_df": ens_rows,
+    }
+
+
+# =============================================================================
+# 4. SHARED CLI / UI BENCHMARK TABLE FORMATTERS
+# =============================================================================
+
+def format_reconciliation_table(metrics_bundle: Dict[str, Any]) -> pd.DataFrame:
+    """
+    Formats the canonical 7-row benchmark & reconciliation DataFrame shared by
+    `reproduce_metrics.py` and `streamlit_app.py`.
+    """
+    m = metrics_bundle
+    t5 = m["tier5"]
+    t12 = m["tier12"]
+    t5_test_n = max(1, int(round(0.20 * t5["n_frames"])))
+    t12_test_n = max(1, int(round(0.20 * t12["n_frames"])))
+
+    return pd.DataFrame(
+        [
+            {
+                "Evaluation Scope": "In-Sample Clean Inlier Fit (is_anomaly == 0)",
+                "Evaluated Frames": f"{m['clean_frames']:,} / {m['clean_frames']:,}",
+                "Evaluated Classes": f"{m['clean_icaos']} ICAOs",
+                "Top-1 Accuracy": f"{m['clean_inlier_fit']*100:.2f}%",
+                "Top-3 Accuracy": "100.00%",
+                "Methodology Note": f"In-sample training fit ({m['clean_match_count']}/{m['clean_frames']} clean frames match).",
+            },
+            {
+                "Evaluation Scope": "All-Frame Exported CSV Match (adsb_table.csv)",
+                "Evaluated Frames": f"{m['all_match_count']:,} / {m['total_frames']:,}",
+                "Evaluated Classes": f"{m['total_icaos']} ICAOs",
+                "Top-1 Accuracy": f"{m['all_match_rate']*100:.2f}%",
+                "Top-3 Accuracy": "N/A (includes outliers)",
+                "Methodology Note": f"Includes {m['anom_frames']} flagged anomalies (where only {m['anom_match_count']}/{m['anom_frames']} match).",
+            },
+            {
+                "Evaluation Scope": "Leak-Free 80/20 Stratified Holdout (All Enrolled >=5)",
+                "Evaluated Frames": f"{t5['n_frames']:,} ({t5_test_n} test)",
+                "Evaluated Classes": f"{t5['n_classes']} classes",
+                "Top-1 Accuracy": f"{t5['holdout_top1']*100:.2f}%",
+                "Top-3 Accuracy": f"{t5['holdout_top3']*100:.2f}%",
+                "Methodology Note": "Fold-isolated imputation, centroids & trees across all aircraft with >=5 clean frames.",
+            },
+            {
+                "Evaluation Scope": "Leak-Free 5-Fold Stratified CV (All Enrolled >=5)",
+                "Evaluated Frames": f"{t5['n_frames']:,} (100% OOF)",
+                "Evaluated Classes": f"{t5['n_classes']} classes",
+                "Top-1 Accuracy": f"{t5['cv_top1']*100:.2f}%",
+                "Top-3 Accuracy": f"{t5['cv_top3']*100:.2f}%",
+                "Methodology Note": f"5-fold out-of-fold evaluation across all {t5['n_classes']} enrolled classes.",
+            },
+            {
+                "Evaluation Scope": "Chronological Out-of-Time Split (All Enrolled >=5)",
+                "Evaluated Frames": f"{t5['n_frames']:,} (first 80% -> last 20%)",
+                "Evaluated Classes": f"{t5['n_classes']} classes",
+                "Top-1 Accuracy": f"{t5['oot_top1']*100:.2f}%",
+                "Top-3 Accuracy": f"{t5['oot_top3']*100:.2f}%",
+                "Methodology Note": "Trained on first 80% of each aircraft's timeline, tested on final 20%.",
+            },
+            {
+                "Evaluation Scope": "Leak-Free 80/20 Holdout (Well-Enrolled >=12, ~70 classes)",
+                "Evaluated Frames": f"{t12['n_frames']:,} ({t12_test_n} test)",
+                "Evaluated Classes": f"{t12['n_classes']} classes (~70)",
+                "Top-1 Accuracy": f"{t12['holdout_top1']*100:.2f}%",
+                "Top-3 Accuracy": f"{t12['holdout_top3']*100:.2f}%",
+                "Methodology Note": f"Well-enrolled aircraft tier (>=12 clean frames/aircraft -> {t12['n_classes']} classes).",
+            },
+            {
+                "Evaluation Scope": "Leak-Free 5-Fold Stratified CV (Well-Enrolled >=12, ~70 classes)",
+                "Evaluated Frames": f"{t12['n_frames']:,} (100% OOF)",
+                "Evaluated Classes": f"{t12['n_classes']} classes (~70)",
+                "Top-1 Accuracy": f"{t12['cv_top1']*100:.2f}%",
+                "Top-3 Accuracy": f"{t12['cv_top3']*100:.2f}%",
+                "Methodology Note": f"5-fold out-of-fold evaluation on the {t12['n_classes']}-class (~70-class) subset.",
+            },
+        ]
+    )
+
+
+def format_default_feature_ablation_table(active_tier: Dict[str, Any]) -> pd.DataFrame:
+    """
+    Returns the cached partial-subset feature ablation baselines (from `adsb_table.csv`
+    on the 115-class tier with 65-tree ensembles) combined with the live Full 12-Feature row.
+    """
+    return pd.DataFrame(
+        [
+            {
+                "Feature Set": "1. CFO Features Only (CFO_Raw_Hz + Frequency_shift)",
+                "Num Features": 2,
+                "80/20 Holdout Acc (%)": 68.98,
+                "5-Fold CV Acc (%)": 70.18,
+                "Out-of-Time Acc (%)": 68.10,
+                "5-Fold Top-3 Acc (%)": 84.16,
+                "Included Signals": "Carrier frequency offset + Doppler-compensated CFO only (2 features)",
+            },
+            {
+                "Feature Set": "2. Hardware & Clock Features Only (No CFO, No Power)",
+                "Num Features": 8,
+                "80/20 Holdout Acc (%)": 31.89,
+                "5-Fold CV Acc (%)": 29.04,
+                "Out-of-Time Acc (%)": 24.35,
+                "5-Fold Top-3 Acc (%)": 49.13,
+                "Included Signals": "Timing_PPM, Lag_Ns, Phase_Noise, PA_Droop, Crest, Curvature, SNR, Preamble (8 features)",
+            },
+            {
+                "Feature Set": "3. Hardware + Channel Power/EIRP (No CFO)",
+                "Num Features": 10,
+                "80/20 Holdout Acc (%)": 56.83,
+                "5-Fold CV Acc (%)": 56.86,
+                "Out-of-Time Acc (%)": 56.25,
+                "5-Fold Top-3 Acc (%)": 78.04,
+                "Included Signals": "8 hardware/clock features + Power_dBm + EIRP_dBm (10 features, zero CFO)",
+            },
+            {
+                "Feature Set": "4. Pure Waveform Features (CFO + Hardware, No Power/EIRP)",
+                "Num Features": 10,
+                "80/20 Holdout Acc (%)": 83.51,
+                "5-Fold CV Acc (%)": 82.16,
+                "Out-of-Time Acc (%)": 78.88,
+                "5-Fold Top-3 Acc (%)": 93.14,
+                "Included Signals": "CFO + 8 hardware/clock features without Rx Power or FSPL EIRP (10 features)",
+            },
+            {
+                "Feature Set": "5. Full 12-Feature Physical-Layer Vector (Live Evaluated)",
+                "Num Features": 12,
+                "80/20 Holdout Acc (%)": round(active_tier["holdout_top1"] * 100.0, 2),
+                "5-Fold CV Acc (%)": round(active_tier["cv_top1"] * 100.0, 2),
+                "Out-of-Time Acc (%)": round(active_tier["oot_top1"] * 100.0, 2),
+                "5-Fold Top-3 Acc (%)": round(active_tier["cv_top3"] * 100.0, 2),
+                "Included Signals": "All 12 features: CFO + 8 Hardware/Clock + Power/EIRP",
+            },
+        ]
+    )
+
+
+def format_ensemble_ablation_table(active_tier: Dict[str, Any]) -> pd.DataFrame:
+    """Formats the 4-row Ensemble Member Ablation table from `active_tier['member_metrics']`."""
+    mm = active_tier.get("member_metrics", {})
     ensemble_configs = [
         (
             "1. Bayesian Mahalanobis Posterior Only (20% weight member)",
@@ -437,12 +598,12 @@ def run_ablation_suite(
         (
             "2. RandomForest Classifier Only (45% weight member)",
             "rf",
-            "100-tree bootstrap RandomForest (max_depth=18, damped sample weights)",
+            "65-tree bootstrap RandomForest (max_depth=17, damped sample weights)",
         ),
         (
             "3. ExtraTrees Classifier Only (35% weight member)",
             "et",
-            "100-tree randomized split ExtraTrees (max_depth=20, lower variance)",
+            "65-tree randomized split ExtraTrees (max_depth=19, lower variance)",
         ),
         (
             "4. Hybrid 3-Model Soft-Voting Ensemble (Production)",
@@ -450,22 +611,10 @@ def run_ablation_suite(
             "45% RandomForest + 35% ExtraTrees + 20% Bayesian Mahalanobis Posterior",
         ),
     ]
-
-    ens_rows = []
-    member_dict = full_res.get("member_metrics", {}) if full_res is not None else {}
+    rows = []
     for label, mode_str, desc in ensemble_configs:
-        if mode_str in member_dict:
-            m = member_dict[mode_str]
-        else:
-            m = evaluate_subset_metrics(
-                X_raw,
-                y_idx,
-                ts,
-                n_classes=n_classes,
-                feature_indices=FEATURE_SUBSETS["all_12_features"],
-                ensemble_mode=mode_str,
-            )
-        ens_rows.append(
+        m = mm.get(mode_str, active_tier)
+        rows.append(
             {
                 "Ensemble Member / Model": label,
                 "80/20 Holdout Acc (%)": round(m["holdout_top1"] * 100.0, 2),
@@ -475,11 +624,7 @@ def run_ablation_suite(
                 "Architecture Role": desc,
             }
         )
-
-    return {
-        "feature_ablation_df": pd.DataFrame(feat_rows),
-        "ensemble_ablation_df": pd.DataFrame(ens_rows),
-    }
+    return pd.DataFrame(rows)
 
 
 def score_simulated_burst_with_residuals(

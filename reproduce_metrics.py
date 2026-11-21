@@ -2,15 +2,12 @@
 Reproducible Benchmark, Class Census & Ablation Runner (`reproduce_metrics.py`).
 
 Loads the exported 2,809-frame TU Wien rooftop telemetry table (`adsb_table.csv`) and prints:
-1. Exact Dataset & Class Count Census (174 total ICAOs, 161 clean ICAOs, 115 classes with >= 5
-   clean frames, and 68 classes (~70 classes) with >= 12 clean frames).
-2. Explicit Reconciliation of "100.0% In-Sample Clean Inlier Fit" vs. "86.5% All-Frame Match Rate"
-   vs. Leak-Free Out-of-Sample Accuracies (80/20 Stratified Holdout, 5-Fold Stratified CV,
-   and Chronological Out-of-Time Split).
-3. Feature Group Ablation Study: CFO Features Only vs. Hardware Transient/Clock Features (No CFO)
-   vs. Pure Waveform Features vs. Full 12-Feature Vector.
-4. Ensemble Member Ablation Study: Bayesian Mahalanobis Posterior vs. RandomForest vs. ExtraTrees
-   vs. 3-Model Soft-Voting Ensemble.
+  1. Reconciliation Table (`format_reconciliation_table`): In-Sample Clean Fit (100.0%) vs.
+     Exported CSV Match (86.54%) vs. Leak-Free OOS Accuracies across both class tiers
+     (>= 5 clean frames = 115 classes; >= 12 clean frames = 72 classes, ~70 classes).
+  2. Feature Group Ablation Study (`CFO Only` vs. `Hardware/Clock Only` vs. `Full 12-Feature`).
+  3. Ensemble Member Ablation Study (`Mahalanobis` vs. `RandomForest` vs. `ExtraTrees` vs. `Ensemble`).
+  4. Out-of-Fold Backtest Residual Quantiles used for simulator uncertainty intervals.
 
 Usage:
     python reproduce_metrics.py
@@ -25,7 +22,11 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 import pandas as pd
-from adsb_rf.evaluation import compute_reconciliation_and_headline_metrics, run_ablation_suite
+from adsb_rf.evaluation import (
+    compute_reconciliation_and_headline_metrics,
+    format_reconciliation_table,
+    run_ablation_suite,
+)
 
 
 def main(csv_path: str | Path = ROOT_DIR / "adsb_table.csv") -> None:
@@ -37,9 +38,7 @@ def main(csv_path: str | Path = ROOT_DIR / "adsb_table.csv") -> None:
 
     df = pd.read_csv(path)
     m = compute_reconciliation_and_headline_metrics(df)
-    t5 = m["tier5"]
-    t12 = m["tier12"]
-    res = m["residual_uncertainty"]
+    t5, res = m["tier5"], m["residual_uncertainty"]
 
     print("=" * 94)
     print("1090 MHz ADS-B PHYSICAL-LAYER RF FINGERPRINTING — REPRODUCIBLE BENCHMARK & ABLATION REPORT")
@@ -52,65 +51,7 @@ def main(csv_path: str | Path = ROOT_DIR / "adsb_table.csv") -> None:
 
     print("\n1. RECONCILIATION: IN-SAMPLE CLEAN FIT (100.0%) vs. EXPORTED CSV MATCH (86.5%) vs. LEAK-FREE OOS")
     print("-" * 94)
-    reconcile_rows = [
-        {
-            "Metric / Evaluation Scope": "In-Sample Clean Inlier Fit (is_anomaly == 0)",
-            "Evaluated Frames": f"{m['clean_frames']:,} / {m['clean_frames']:,}",
-            "Evaluated Classes": f"{m['clean_icaos']} ICAOs",
-            "Top-1 Accuracy": f"{m['clean_inlier_fit']*100:.2f}%",
-            "Top-3 Accuracy": "100.00%",
-            "Methodology Note": f"In-sample training fit ({m['clean_match_count']}/{m['clean_frames']} clean frames match).",
-        },
-        {
-            "Metric / Evaluation Scope": "All-Frame Exported CSV Match (adsb_table.csv)",
-            "Evaluated Frames": f"{m['all_match_count']:,} / {m['total_frames']:,}",
-            "Evaluated Classes": f"{m['total_icaos']} ICAOs",
-            "Top-1 Accuracy": f"{m['all_match_rate']*100:.2f}%",
-            "Top-3 Accuracy": "N/A (includes outliers)",
-            "Methodology Note": f"Includes {m['anom_frames']} flagged anomalies (where only {m['anom_match_count']}/{m['anom_frames']} match).",
-        },
-        {
-            "Metric / Evaluation Scope": "Leak-Free 80/20 Stratified Holdout (All Enrolled >=5)",
-            "Evaluated Frames": f"{t5['n_frames']:,} (461 test)",
-            "Evaluated Classes": f"{t5['n_classes']} classes",
-            "Top-1 Accuracy": f"{t5['holdout_top1']*100:.2f}%",
-            "Top-3 Accuracy": f"{t5['holdout_top3']*100:.2f}%",
-            "Methodology Note": "Fold-isolated imputation, centroids & trees; >=5 clean frames/class.",
-        },
-        {
-            "Metric / Evaluation Scope": "Leak-Free 5-Fold Stratified CV (All Enrolled >=5)",
-            "Evaluated Frames": f"{t5['n_frames']:,} (100% OOF)",
-            "Evaluated Classes": f"{t5['n_classes']} classes",
-            "Top-1 Accuracy": f"{t5['cv_top1']*100:.2f}%",
-            "Top-3 Accuracy": f"{t5['cv_top3']*100:.2f}%",
-            "Methodology Note": "5-fold out-of-fold evaluation across all 115 enrolled classes.",
-        },
-        {
-            "Metric / Evaluation Scope": "Chronological Out-of-Time Split (All Enrolled >=5)",
-            "Evaluated Frames": f"{t5['n_frames']:,} (first 80% -> last 20%)",
-            "Evaluated Classes": f"{t5['n_classes']} classes",
-            "Top-1 Accuracy": f"{t5['oot_top1']*100:.2f}%",
-            "Top-3 Accuracy": f"{t5['oot_top3']*100:.2f}%",
-            "Methodology Note": "Trained on first 80% of each aircraft's timeline, tested on final 20%.",
-        },
-        {
-            "Metric / Evaluation Scope": "Leak-Free 80/20 Holdout (Well-Enrolled >=12, ~70 classes)",
-            "Evaluated Frames": f"{t12['n_frames']:,} (397 test)",
-            "Evaluated Classes": f"{t12['n_classes']} classes (~70)",
-            "Top-1 Accuracy": f"{t12['holdout_top1']*100:.2f}%",
-            "Top-3 Accuracy": f"{t12['holdout_top3']*100:.2f}%",
-            "Methodology Note": f"Well-enrolled aircraft tier (>=12 clean frames/aircraft -> {t12['n_classes']} classes).",
-        },
-        {
-            "Metric / Evaluation Scope": "Leak-Free 5-Fold Stratified CV (Well-Enrolled >=12, ~70 classes)",
-            "Evaluated Frames": f"{t12['n_frames']:,} (100% OOF)",
-            "Evaluated Classes": f"{t12['n_classes']} classes (~70)",
-            "Top-1 Accuracy": f"{t12['cv_top1']*100:.2f}%",
-            "Top-3 Accuracy": f"{t12['cv_top3']*100:.2f}%",
-            "Methodology Note": f"5-fold out-of-fold evaluation on the {t12['n_classes']}-class (~70-class) subset.",
-        },
-    ]
-    print(pd.DataFrame(reconcile_rows).to_string(index=False))
+    print(format_reconciliation_table(m).to_string(index=False))
 
     abl5 = run_ablation_suite(df, min_frames=5, precomputed_full_res=t5)
     print(f"\n2. FEATURE GROUP ABLATION: CFO vs. HARDWARE TRANSIENT & CLOCK FEATURES ({t5['n_classes']} Classes, {t5['n_frames']:,} Frames)")
@@ -127,12 +68,8 @@ def main(csv_path: str | Path = ROOT_DIR / "adsb_table.csv") -> None:
         f"  * Out-of-Fold Mahalanobis Distance (d_M) : Median = {res['mahal_median']:.2f} sigma | "
         f"90th Pct = {res['mahal_p90']:.2f} sigma | 95th Pct = {res['mahal_p95']:.2f} sigma"
     )
-    print(
-        f"  * Out-of-Fold |CFO Error| 90th Pct       : +/- {res['cfo_err_p90_khz']:.2f} kHz"
-    )
-    print(
-        f"  * Out-of-Fold |Timing Drift Error| 90th  : +/- {res['ppm_err_p90']:.1f} ppm"
-    )
+    print(f"  * Out-of-Fold |CFO Error| 90th Pct       : +/- {res['cfo_err_p90_khz']:.2f} kHz")
+    print(f"  * Out-of-Fold |Timing Drift Error| 90th  : +/- {res['ppm_err_p90']:.1f} ppm")
     print("=" * 94)
 
 

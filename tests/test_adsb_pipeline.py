@@ -52,7 +52,7 @@ from adsb_rf.evaluation import (
 )
 from adsb_rf.features import (
     RF_FEATURE_NAMES,
-    _recover_missing_cfo_from_iq,
+    _backfill_aircraft_kinematics,
     extract_12_rf_features_from_frame,
 )
 from adsb_rf.models import fit_fold_ensemble, predict_fold_ensemble
@@ -122,11 +122,16 @@ class TestADSBDSPCore(unittest.TestCase):
         # Test both moderate (-106 kHz) and high (+620 kHz, past +/- 500 kHz 1us wrapping limit!) CFO
         for true_cfo_hz in (-106447.0, 620000.0):
             iq_res = mask * np.exp(1j * 2.0 * np.pi * true_cfo_hz * t)
-            rec_cfo, _ = _recover_missing_cfo_from_iq({"IQ_res": iq_res, "Bits": bits})
+            rec_cfo, _ = recover_cfo_unwrap_free(iq_res, bits)
             self.assertLess(abs(rec_cfo - true_cfo_hz), 1500.0)
             cfo_dsp, _ = calculate_freq_shift_and_phase_noise(iq_res, bits)
             self.assertFalse(np.isnan(cfo_dsp))
             self.assertLess(abs(cfo_dsp - true_cfo_hz), 1500.0)
+
+        # Verify kinematic backfill recovers missing CFO from complex IQ
+        test_frame = {"ICAO_Hex": "4401A2", "IQ_res": iq_res, "Bits": bits}
+        _backfill_aircraft_kinematics([test_frame], causal_only=True)
+        self.assertLess(abs(test_frame["CFO_Raw_Hz"] - true_cfo_hz), 1500.0)
 
         vec12 = extract_12_rf_features_from_frame(
             {"IQ_res": iq_res, "Bits": bits, "CFO_Raw_Hz": rec_cfo, "Power": -55.0}

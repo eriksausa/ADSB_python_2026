@@ -14,12 +14,6 @@ os.environ.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "mplconf
 
 from .assumptions import DEFAULT_ASSUMPTIONS
 
-try:
-    import folium
-    HAS_FOLIUM = True
-except ImportError:
-    HAS_FOLIUM = False
-
 
 def map_planes(
     messages: List[Dict[str, Any]],
@@ -28,8 +22,8 @@ def map_planes(
     rx_lon: float = DEFAULT_ASSUMPTIONS.rx_lon,
 ) -> Path:
     """
-    Generates an interactive HTML map of decoded aircraft positions, highlighting
-    anomalous/spoofed frames in red and valid frames in blue/teal.
+    Generates a dependency-free interactive Leaflet.js HTML trajectory map of decoded
+    airborne Mode-S positions, highlighting anomalous/spoofed frames in red.
     """
     out_path = Path(output_html)
     pos_msgs = [
@@ -40,52 +34,6 @@ def map_planes(
         and abs(m.get("Latitude", 0.0)) <= 90.0
         and abs(m.get("Longitude", 0.0)) <= 180.0
     ]
-
-    if HAS_FOLIUM:
-        fmap = folium.Map(
-            location=[rx_lat, rx_lon],
-            zoom_start=9,
-            tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-            attr="Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community",
-        )
-
-        folium.Marker(
-            location=[rx_lat, rx_lon],
-            popup="<b>Antenna Location</b><br>TU Wien EI Building",
-            icon=folium.Icon(color="green", icon="radio"),
-        ).add_to(fmap)
-
-        for msg in pos_msgs:
-            icao_hex = msg.get("ICAO_Hex", f"{msg['ICAO']:06X}")
-            lat = float(msg["Latitude"])
-            lon = float(msg["Longitude"])
-            alt = float(msg.get("Altitude", 0.0))
-            pwr = float(msg.get("Power", 0.0))
-            dist = float(msg.get("Distance_from_Rx", 0.0))
-            cfo = float(msg.get("Frequency_shift", 0.0))
-            t_ppm = float(msg.get("Timing_Offset_PPM", 0.0))
-            is_anom = bool(msg.get("Is_Anomaly", False))
-            reasons = msg.get("Anomaly_Reasons", "Normal")
-
-            popup_html = (
-                f"<b>ICAO:</b> {icao_hex} (Pred: {msg.get('Predicted_ICAO_Hex', icao_hex)})<br>"
-                f"<b>Status:</b> {'ANOMALY: ' + reasons if is_anom else 'Valid'}<br>"
-                f"<b>Altitude:</b> {alt:.0f} ft | <b>Distance:</b> {dist/1000.0:.1f} km<br>"
-                f"<b>Rx Power:</b> {pwr:.1f} dBm | <b>CFO:</b> {cfo/1e3:.2f} kHz<br>"
-                f"<b>Timing Offset:</b> {t_ppm:.2f} ppm<br>"
-                f"<a href='https://www.planespotters.net/search?q={icao_hex}' target='_blank'>Planespotters</a>"
-            )
-            folium.CircleMarker(
-                location=[lat, lon],
-                radius=7 if is_anom else 5,
-                color="#d90429" if is_anom else "#0077b6",
-                fill=True,
-                fill_opacity=0.85,
-                popup=folium.Popup(popup_html, max_width=300),
-            ).add_to(fmap)
-
-        fmap.save(str(out_path))
-        return out_path
 
     markers_data = []
     for msg in pos_msgs:

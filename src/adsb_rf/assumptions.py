@@ -56,6 +56,7 @@ class Assumptions:
     blind_ppm_contrast_ratio: float = 2.2              # Minimum half-chip energy ratio (E_max / E_min) for uncorrupted slot mask
     blind_preamble_xcorr_min: float = 0.75             # Minimum normalized preamble correlation for CRC-failed burst gating
     blind_clean_slot_ratio_min: float = 0.80           # Minimum fraction of confident PPM slots required for blind attribution
+    cfo_phase_delta_std_gate_rad: float = 0.45         # Legacy 1.0 us inter-slot phase spread threshold before unwrap-free fallback
     active_pulse_percentile: float = 55.0              # Envelope percentile separating active PPM pulses (~47% duty cycle) from noise
     noise_floor_percentile: float = 35.0               # Envelope percentile isolating off-chip baseline thermal noise
 

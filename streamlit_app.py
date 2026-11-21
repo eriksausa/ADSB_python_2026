@@ -34,6 +34,9 @@ from adsb_rf import (
     DEFAULT_ASSUMPTIONS,
     build_aircraft_profiles_from_df,
     compute_reconciliation_and_headline_metrics,
+    format_default_feature_ablation_table,
+    format_ensemble_ablation_table,
+    format_reconciliation_table,
     get_assumptions_table_rows,
     map_planes,
     plot_eye_diagram,
@@ -374,69 +377,7 @@ def main() -> None:
             "(which includes `413` flagged physical-layer anomalies where `d_M > 4.5 σ`), and the **leak-free out-of-sample evaluations** "
             "across both the **115-class ($\\ge 5$ clean frames)** and **72-class (~70 classes, $\\ge 12$ clean frames)** tiers."
         )
-        t5 = metrics_bundle["tier5"]
-        t12 = metrics_bundle["tier12"]
-        reconcile_df = pd.DataFrame(
-            [
-                {
-                    "Evaluation Scope": "In-Sample Clean Inlier Fit (is_anomaly == 0)",
-                    "Evaluated Frames": f"{metrics_bundle['clean_frames']:,} / {metrics_bundle['clean_frames']:,}",
-                    "Evaluated Classes": f"{metrics_bundle['clean_icaos']} ICAOs",
-                    "Top-1 Accuracy": f"{metrics_bundle['clean_inlier_fit']*100:.2f}%",
-                    "Top-3 Accuracy": "100.00%",
-                    "Notes": f"In-sample training fit ({metrics_bundle['clean_match_count']}/{metrics_bundle['clean_frames']} clean frames match).",
-                },
-                {
-                    "Evaluation Scope": "All-Frame Exported CSV Match (adsb_table.csv)",
-                    "Evaluated Frames": f"{metrics_bundle['all_match_count']:,} / {metrics_bundle['total_frames']:,}",
-                    "Evaluated Classes": f"{metrics_bundle['total_icaos']} ICAOs",
-                    "Top-1 Accuracy": f"{metrics_bundle['all_match_rate']*100:.2f}%",
-                    "Top-3 Accuracy": "N/A (includes outliers)",
-                    "Notes": f"Includes {metrics_bundle['anom_frames']} flagged anomalies (where only {metrics_bundle['anom_match_count']}/{metrics_bundle['anom_frames']} match).",
-                },
-                {
-                    "Evaluation Scope": "Leak-Free 80/20 Stratified Holdout (All Enrolled >=5)",
-                    "Evaluated Frames": f"{t5['n_frames']:,} (461 test)",
-                    "Evaluated Classes": f"{t5['n_classes']} classes",
-                    "Top-1 Accuracy": f"{t5['holdout_top1']*100:.2f}%",
-                    "Top-3 Accuracy": f"{t5['holdout_top3']*100:.2f}%",
-                    "Notes": "Fold-isolated imputation, centroids & trees across all aircraft with >=5 clean frames.",
-                },
-                {
-                    "Evaluation Scope": "Leak-Free 5-Fold Stratified CV (All Enrolled >=5)",
-                    "Evaluated Frames": f"{t5['n_frames']:,} (100% OOF)",
-                    "Evaluated Classes": f"{t5['n_classes']} classes",
-                    "Top-1 Accuracy": f"{t5['cv_top1']*100:.2f}%",
-                    "Top-3 Accuracy": f"{t5['cv_top3']*100:.2f}%",
-                    "Notes": "5-fold out-of-fold evaluation across all 115 enrolled classes.",
-                },
-                {
-                    "Evaluation Scope": "Chronological Out-of-Time Split (All Enrolled >=5)",
-                    "Evaluated Frames": f"{t5['n_frames']:,} (80% early -> 20% late)",
-                    "Evaluated Classes": f"{t5['n_classes']} classes",
-                    "Top-1 Accuracy": f"{t5['oot_top1']*100:.2f}%",
-                    "Top-3 Accuracy": f"{t5['oot_top3']*100:.2f}%",
-                    "Notes": "Trained on first 80% of each aircraft's timeline, tested on final 20%.",
-                },
-                {
-                    "Evaluation Scope": "Leak-Free 80/20 Holdout (Well-Enrolled >=12, ~70 classes)",
-                    "Evaluated Frames": f"{t12['n_frames']:,} (397 test)",
-                    "Evaluated Classes": f"{t12['n_classes']} classes (~70)",
-                    "Top-1 Accuracy": f"{t12['holdout_top1']*100:.2f}%",
-                    "Top-3 Accuracy": f"{t12['holdout_top3']*100:.2f}%",
-                    "Notes": f"Well-enrolled aircraft tier (>=12 clean frames/aircraft -> {t12['n_classes']} classes).",
-                },
-                {
-                    "Evaluation Scope": "Leak-Free 5-Fold Stratified CV (Well-Enrolled >=12, ~70 classes)",
-                    "Evaluated Frames": f"{t12['n_frames']:,} (100% OOF)",
-                    "Evaluated Classes": f"{t12['n_classes']} classes (~70)",
-                    "Top-1 Accuracy": f"{t12['cv_top1']*100:.2f}%",
-                    "Top-3 Accuracy": f"{t12['cv_top3']*100:.2f}%",
-                    "Notes": f"5-fold out-of-fold evaluation on the {t12['n_classes']}-class (~70-class) subset.",
-                },
-            ]
-        )
-        st.dataframe(reconcile_df, use_container_width=True, hide_index=True)
+        st.dataframe(format_reconciliation_table(metrics_bundle), width="stretch", hide_index=True)
 
         st.subheader(f"2️⃣ Feature Group Ablation: CFO vs. Hardware Transient & Clock Features ({active_tier['n_classes']} Classes)")
         run_live_feat_ablation = st.checkbox(
@@ -447,99 +388,14 @@ def main() -> None:
             abl_dict = get_cached_ablations(df, min_frames=active_tier["min_frames"], _precomputed_tier=active_tier)
             feat_abl_df = abl_dict["feature_ablation_df"]
         else:
-            feat_abl_df = pd.DataFrame(
-                [
-                    {
-                        "Feature Set": "1. CFO Features Only (CFO_Raw_Hz + Frequency_shift)",
-                        "Num Features": 2,
-                        "80/20 Holdout Acc (%)": 68.76,
-                        "5-Fold CV Acc (%)": 70.49,
-                        "Out-of-Time Acc (%)": 69.18,
-                        "5-Fold Top-3 Acc (%)": 83.94,
-                        "Included Signals": "Carrier frequency offset + Doppler-compensated CFO only (2 features)",
-                    },
-                    {
-                        "Feature Set": "2. Hardware & Clock Features Only (No CFO, No Power)",
-                        "Num Features": 8,
-                        "80/20 Holdout Acc (%)": 29.50,
-                        "5-Fold CV Acc (%)": 28.86,
-                        "Out-of-Time Acc (%)": 26.51,
-                        "5-Fold Top-3 Acc (%)": 50.13,
-                        "Included Signals": "Timing_PPM, Lag_Ns, Phase_Noise, PA_Droop, Crest, Curvature, SNR, Preamble (8 features)",
-                    },
-                    {
-                        "Feature Set": "3. Hardware + Channel Power/EIRP (No CFO)",
-                        "Num Features": 10,
-                        "80/20 Holdout Acc (%)": 60.95,
-                        "5-Fold CV Acc (%)": 57.25,
-                        "Out-of-Time Acc (%)": 52.80,
-                        "5-Fold Top-3 Acc (%)": 77.69,
-                        "Included Signals": "8 hardware/clock features + Power_dBm + EIRP_dBm (10 features, zero CFO)",
-                    },
-                    {
-                        "Feature Set": "4. Pure Waveform Features (CFO + Hardware, No Power/EIRP)",
-                        "Num Features": 10,
-                        "80/20 Holdout Acc (%)": 83.95,
-                        "5-Fold CV Acc (%)": 82.68,
-                        "Out-of-Time Acc (%)": 79.31,
-                        "5-Fold Top-3 Acc (%)": 92.36,
-                        "Included Signals": "CFO + 8 hardware/clock features without Rx Power or FSPL EIRP (10 features)",
-                    },
-                    {
-                        "Feature Set": "5. Full 12-Feature Physical-Layer Vector (Live Evaluated)",
-                        "Num Features": 12,
-                        "80/20 Holdout Acc (%)": round(active_tier["holdout_top1"] * 100.0, 2),
-                        "5-Fold CV Acc (%)": round(active_tier["cv_top1"] * 100.0, 2),
-                        "Out-of-Time Acc (%)": round(active_tier["oot_top1"] * 100.0, 2),
-                        "5-Fold Top-3 Acc (%)": round(active_tier["cv_top3"] * 100.0, 2),
-                        "Included Signals": "All 12 features: CFO + 8 Hardware/Clock + Power/EIRP",
-                    },
-                ]
-            )
-        st.dataframe(feat_abl_df, use_container_width=True, hide_index=True)
+            feat_abl_df = format_default_feature_ablation_table(active_tier)
+        st.dataframe(feat_abl_df, width="stretch", hide_index=True)
 
         st.subheader(f"3️⃣ Ensemble Member Ablation: Mahalanobis vs. RandomForest vs. ExtraTrees ({active_tier['n_classes']} Classes)")
-        mm = active_tier.get("member_metrics", {})
-        ens_abl_df = pd.DataFrame(
-            [
-                {
-                    "Ensemble Member / Model": "1. Bayesian Mahalanobis Posterior Only (20% weight)",
-                    "80/20 Holdout Acc (%)": round(mm.get("mahalanobis", active_tier)["holdout_top1"] * 100.0, 2),
-                    "5-Fold CV Acc (%)": round(mm.get("mahalanobis", active_tier)["cv_top1"] * 100.0, 2),
-                    "Out-of-Time Acc (%)": round(mm.get("mahalanobis", active_tier)["oot_top1"] * 100.0, 2),
-                    "5-Fold Top-3 Acc (%)": round(mm.get("mahalanobis", active_tier)["cv_top3"] * 100.0, 2),
-                    "Architecture Role": "Parametric diagonal Gaussian likelihood around Median/MAD hardware centroid",
-                },
-                {
-                    "Ensemble Member / Model": "2. RandomForest Classifier Only (45% weight)",
-                    "80/20 Holdout Acc (%)": round(mm.get("rf", active_tier)["holdout_top1"] * 100.0, 2),
-                    "5-Fold CV Acc (%)": round(mm.get("rf", active_tier)["cv_top1"] * 100.0, 2),
-                    "Out-of-Time Acc (%)": round(mm.get("rf", active_tier)["oot_top1"] * 100.0, 2),
-                    "5-Fold Top-3 Acc (%)": round(mm.get("rf", active_tier)["cv_top3"] * 100.0, 2),
-                    "Architecture Role": "55-tree bootstrap RandomForest (max_depth=16, damped sample weights)",
-                },
-                {
-                    "Ensemble Member / Model": "3. ExtraTrees Classifier Only (35% weight)",
-                    "80/20 Holdout Acc (%)": round(mm.get("et", active_tier)["holdout_top1"] * 100.0, 2),
-                    "5-Fold CV Acc (%)": round(mm.get("et", active_tier)["cv_top1"] * 100.0, 2),
-                    "Out-of-Time Acc (%)": round(mm.get("et", active_tier)["oot_top1"] * 100.0, 2),
-                    "5-Fold Top-3 Acc (%)": round(mm.get("et", active_tier)["cv_top3"] * 100.0, 2),
-                    "Architecture Role": "55-tree randomized split ExtraTrees (max_depth=18, lower variance)",
-                },
-                {
-                    "Ensemble Member / Model": "4. Hybrid 3-Model Soft-Voting Ensemble (Production)",
-                    "80/20 Holdout Acc (%)": round(mm.get("ensemble", active_tier)["holdout_top1"] * 100.0, 2),
-                    "5-Fold CV Acc (%)": round(mm.get("ensemble", active_tier)["cv_top1"] * 100.0, 2),
-                    "Out-of-Time Acc (%)": round(mm.get("ensemble", active_tier)["oot_top1"] * 100.0, 2),
-                    "5-Fold Top-3 Acc (%)": round(mm.get("ensemble", active_tier)["cv_top3"] * 100.0, 2),
-                    "Architecture Role": "45% RandomForest + 35% ExtraTrees + 20% Bayesian Mahalanobis Posterior",
-                },
-            ]
-        )
-        st.dataframe(ens_abl_df, use_container_width=True, hide_index=True)
+        st.dataframe(format_ensemble_ablation_table(active_tier), width="stretch", hide_index=True)
 
         st.subheader("4️⃣ Explicit Physical, DSP & Modeling Assumptions (`src/adsb_rf/assumptions.py`)")
-        st.dataframe(pd.DataFrame(get_assumptions_table_rows()), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(get_assumptions_table_rows()), width="stretch", hide_index=True)
 
         st.subheader("5️⃣ Honest Limitations & Operational Scope")
         st.markdown(
@@ -582,7 +438,7 @@ def main() -> None:
             "Aggregated per-aircraft physical-layer hardware profiles across the 20.97-second TU Wien rooftop capture "
             "(sorted by number of received frames, including 90% empirical residual intervals)."
         )
-        st.dataframe(prof_df, use_container_width=True, hide_index=True)
+        st.dataframe(prof_df, width="stretch", hide_index=True)
 
     with tab5:
         st.subheader("📈 Physical-Layer Baseband I/Q Waveform & Mode-S PPM Eye Diagram")
@@ -601,10 +457,10 @@ def main() -> None:
             plot_eye_diagram(burst_10m, msps=10.0, pulse_duration_us=1.0, save_path=eye_png)
 
         with col_iq:
-            st.image(str(iq_png), caption="1090 MHz Mode-S Baseband I/Q, Envelope & Phase Trajectory", use_container_width=True)
+            st.image(str(iq_png), caption="1090 MHz Mode-S Baseband I/Q, Envelope & Phase Trajectory", width="stretch")
 
         with col_eye:
-            st.image(str(eye_png), caption="10 MS/s Mode-S Manchester PPM Eye Diagram (2-Symbol Window)", use_container_width=True)
+            st.image(str(eye_png), caption="10 MS/s Mode-S Manchester PPM Eye Diagram (2-Symbol Window)", width="stretch")
 
 
 if __name__ == "__main__":
